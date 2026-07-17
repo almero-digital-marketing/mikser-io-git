@@ -138,8 +138,10 @@ export function git(options = {}) {
                 return
             }
             logger.info(
-                'git: working folder ready — %s on branch %s (auto-committing [%s], promotes to %s via %s)',
-                folder, writeBranch, paths.join(', '), targetBranch, forge,
+                'git: working folder ready — %s on branch %s (auto-committing %s, promotes to %s via %s)',
+                folder, writeBranch,
+                paths ? `[${paths.join(', ')}]` : 'the WHOLE working folder (no `paths` set — relying on .gitignore)',
+                targetBranch, forge,
             )
 
             // Inbound polling — watch mode only; a one-shot build has no

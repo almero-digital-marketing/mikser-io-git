@@ -171,3 +171,50 @@ describe('git.js pathspec scoping (paths param)', () => {
         assert.match(unscoped, /layouts\//)   // still genuinely untracked, just untouched by the scoped add
     })
 })
+
+// The zero-config default (index.js's `paths` config omitted → resolveConfig
+// gives `null`): with NO pathspec at all, git.js's functions operate on the
+// whole repo. This proves the actual behavior that default implies —
+// something outside any collection folder DOES get staged when no `paths`
+// was configured, and .gitignore (not a pathspec) is what would keep
+// node_modules/.env out in that case. Distinct from the scoped-paths suite
+// above, which proves the OPPOSITE guarantee when paths IS given.
+describe('git.js with paths=null (the no-`paths`-configured default)', () => {
+    let dir
+
+    before(async () => {
+        dir = await mkdtemp(path.join(tmpdir(), 'mikser-git-noscope-'))
+        await git.run(dir, ['init', '-b', 'main'])
+        await git.run(dir, ['config', 'user.email', 'test@example.com'])
+        await git.run(dir, ['config', 'user.name', 'Test'])
+        await writeFile(path.join(dir, '.gitignore'), 'ignored-dir/\n')
+        await mkdir(path.join(dir, 'documents'))
+        await mkdir(path.join(dir, 'ignored-dir'))
+        await writeFile(path.join(dir, 'documents', 'post.md'), 'hello')
+        await writeFile(path.join(dir, 'mikser.config.js'), 'export default {}')
+        await writeFile(path.join(dir, 'ignored-dir', 'dep.js'), 'x')
+        await git.addAll(dir)   // no paths arg — baseline covers everything not gitignored
+        await git.commit(dir, 'baseline')
+    })
+
+    after(async () => {
+        await rm(dir, { recursive: true, force: true })
+    })
+
+    it('with no paths arg, an edit OUTSIDE any collection folder still gets staged', async () => {
+        await writeFile(path.join(dir, 'mikser.config.js'), 'export default { changed: true }')
+        await git.addAll(dir)   // no paths — the default-config behavior
+        assert.equal(await git.hasStagedChanges(dir), true)
+        const status = await git.statusPorcelain(dir)
+        assert.match(status, /^M {2}mikser\.config\.js/m)   // staged, not just modified
+    })
+
+    it('.gitignore, not a pathspec, is what keeps an ignored directory out — even unscoped', async () => {
+        await writeFile(path.join(dir, 'ignored-dir', 'dep.js'), 'changed')
+        await git.addAll(dir)
+        // The gitignored file's change never shows up at all, scoped or not —
+        // this is .gitignore doing the work, since there's no pathspec here.
+        const status = await git.statusPorcelain(dir)
+        assert.doesNotMatch(status, /dep\.js/)
+    })
+})

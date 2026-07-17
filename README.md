@@ -30,7 +30,7 @@ mikser's API and MCP endpoints can write to **any registered collection**, not j
 ```
 
 - **The working folder is the checkout.** One `git()` instance manages one repo, one write branch — not a separate nested checkout per collection. Multiple collections (`paths: ['documents', 'layouts']`) share the same commit, the same branch, the same promotion. This also means you don't need a separate repo (or even a separate branch name) per collection the way managing each folder as its own independent checkout would — that shape existed in an earlier version of this plugin and needed real care to avoid two unrelated checkouts fighting over one branch ref; sharing one checkout removes the problem outright.
-- **`paths` is a hard scope, not a convenience.** Every git operation (`status`, `add`, `commit`) is pathspec-scoped to exactly the folders you list. `mikser.config.js`, `node_modules/`, `runtime/`, `out/`, `.env` can sit in the exact same checkout and are never staged, added, or committed by this plugin — regardless of whether they're dirty, regardless of `.gitignore`. Verified directly against a real repo (see [Verified end-to-end](#verified-end-to-end)): an edit to `mikser.config.js` alone produces zero commits; an edit inside a `paths` folder commits normally, and only the files inside `paths` show up in that commit.
+- **`paths`, when set, is a hard scope, not a convenience.** Every git operation (`status`, `add`, `commit`) is pathspec-scoped to exactly the folders you list. `mikser.config.js`, `node_modules/`, `runtime/`, `out/`, `.env` can sit in the exact same checkout and are never staged, added, or committed by this plugin — regardless of whether they're dirty, regardless of `.gitignore`. Verified directly against a real repo (see [Verified end-to-end](#verified-end-to-end)): an edit to `mikser.config.js` alone produces zero commits; an edit inside a `paths` folder commits normally, and only the files inside `paths` show up in that commit. **Omit `paths` and there's no scope at all** — the whole working folder is fair game, and `.gitignore` becomes the only thing keeping the noise out. See [Configure](#configure) for the trade-off.
 - **`mikser` branch** — this plugin's own branch. It commits and pushes here on *every* green cycle, unconditionally. A red cycle never blocks this — the write branch is the durable log; it must never lose work to a later failure.
 - **`main` (or whatever you name your target)** — promoted to only when the cycle that produced the change was green. Promotion is a pull request (GitHub/Gitea) that gets merged automatically on success, or a direct fast-forward push (`forge: 'none'`). A conflict just leaves the PR open — a human resolves it in the forge's own UI, in their own time. This plugin never picks a winner.
 - **Inbound** — remote changes (a human pushed to `main`, or someone pushed directly to `mikser`) are pulled in on a timer and merged into the local working copy. Since `git merge` writes real files, mikser's own file watcher sees them exactly like a local edit — no special wake-up code needed.
@@ -52,7 +52,7 @@ export default {
     plugins: [
         git({
             url:    'https://github.com/your-org/your-content.git',
-            paths:  ['documents'],         // default; which collection folders to auto-commit
+            paths:  ['documents'],         // scope auto-commits to just this folder
             forge:  'github',              // 'github' | 'gitea' | 'none' (default 'none')
             token:  process.env.GITHUB_TOKEN,
         }),
@@ -71,6 +71,15 @@ git({
     token: process.env.GITHUB_TOKEN,
 })
 ```
+
+**Omitting `paths` entirely** commits the whole working folder — no scoping at all:
+
+```js
+git({ url: 'https://github.com/your-org/your-content.git', forge: 'github', token: process.env.GITHUB_TOKEN })
+// no `paths` — everything under the working folder is fair game, subject to .gitignore
+```
+
+This is the honest zero-config default, matching how the plugin actually works ("the working folder is the checkout") rather than silently narrowing to one collection nobody asked for. But **it's a weaker guarantee than `paths`**: when you list specific paths, they're a hard pathspec scope — `mikser.config.js`/`node_modules/`/`.env` are never touched, full stop, regardless of `.gitignore`. Omit `paths` and there's no pathspec at all; **`.gitignore` becomes the only thing standing between `node_modules/`, `.env`, `runtime/`, `out/` and your content repo.** Give the working folder a normal `.gitignore` if you're relying on the default — this plugin doesn't add one for you, and doesn't need to: `git add -A` already respects whatever's there. If you'd rather not depend on remembering that, list `paths` explicitly and get the hard scope instead.
 
 ### Gitea
 
@@ -97,8 +106,10 @@ Promotion becomes a direct `git push mikser:main` (fast-forward only). No API ca
 ```js
 git({
     url:            'https://github.com/org/repo.git',  // REQUIRED
-    paths:          'documents',      // string or array — collection folder(s) to auto-commit,
-                                       // relative to the working folder. Default 'documents'.
+    paths:          undefined,        // string or array — collection folder(s) to auto-commit,
+                                       // relative to the working folder. Default: unset, meaning
+                                       // the WHOLE working folder (subject to .gitignore) — see
+                                       // "Omitting paths entirely" above for the trade-off.
     forge:          'none',           // 'github' | 'gitea' | 'none'
     branch:         'main',           // target branch — promoted to only when green
     writeBranch:    'mikser',         // this plugin's own durable branch
@@ -141,7 +152,16 @@ That recipe attaches git history to the folder without touching a single file �
 
 If the folder is already a checkout of the configured repo, bootstrap just verifies and moves on, every restart, at no cost — the common case after the first connect.
 
-A recommended `.gitignore` in that same folder (`node_modules/`, `runtime/`, `out/`, `.env`) keeps `git status` itself readable for a human poking around — but it's not load-bearing for this plugin. The `paths` pathspec is the actual enforcement; `.gitignore` is just hygiene on top.
+Add a `.gitignore` in that same folder regardless of whether you set `paths` — it keeps `git status` itself readable for a human poking around either way. But its role differs by config: with `paths` set, the pathspec is the real enforcement and `.gitignore` is just hygiene on top; with `paths` omitted, `.gitignore` **is** the enforcement — there's no pathspec backing it up in that case. Use:
+
+```gitignore
+node_modules
+runtime/
+out/
+.env
+```
+
+**Note the missing trailing slash on `node_modules`** — deliberately, not an oversight. A trailing-slash pattern (`node_modules/`) means "directories only" in git's own matching rules, and a *symlinked* `node_modules` (common under npm/pnpm/yarn workspaces) is not a directory by that definition even though it points at one — `node_modules/` silently fails to ignore it, `node_modules` (no slash) matches either shape. Confirmed directly: `git check-ignore -v node_modules` reported "not ignored" against a symlink with the trailing-slash form, and a live no-`paths` test genuinely leaked a workspace-symlinked `node_modules` into a real commit before this was caught. This is exactly the class of subtle miss that makes `paths` the stronger guarantee over `.gitignore` alone — the pathspec doesn't care what shape the excluded thing is.
 
 ## What counts as "green"
 
@@ -188,6 +208,7 @@ The unit suite (59 tests) covers every pure module directly, the forge adapters 
 - **The full real render pipeline** — the actual `mikser-io-example-blog` config: 13 lifecycle plugins, real layouts, a real CSV fetch from a live Google Sheet, real OpenAI vector embeddings, 30 renders, zero warnings or failures. A genuinely green cycle, not an empty test harness.
 - **Real GitHub pull requests, created and merged by the actual API** — not a mocked response, across two separate throwaway repos (one per major design iteration). Multiple full sync cycles each produced their own PR (`Promote mikser → main`), all auto-merged; `gh api` confirmed `main` and `mikser` converged on the identical commit SHA after each merge, and repeated cycles proved the "reuse an open PR, don't spam a new one" / "open a fresh PR once the last one closed" logic works correctly across repeated promotions — including with multiple collections landing in the same commit.
 - **One real bug found and fixed this way** (v1.0.1): `git status --porcelain` collapses a brand-new untracked directory into a single line instead of one per file, so the commit message's file count silently undercounted whenever a change arrived as a new directory (a new author's folder, a new content category). Confirmed directly — a real 2-file new directory produced `"content: 1 file(s)"` before the fix — and fixed with `--untracked-files=all`. `git add -A` itself was never affected; only the message text was wrong.
+- **The zero-config default (`paths` omitted), live.** The same checkout, reconfigured with no `paths` at all, correctly committed the whole working folder — `mikser.config.js`, `package.json`, `authors.csv`, everything not gitignored — on the very next sync, exactly matching the documented behavior. It also surfaced a real, honest-to-document gotcha: the scratch test's `node_modules` was a workspace symlink, and `.gitignore`'s trailing-slash `node_modules/` pattern does **not** match a symlink even when it points at a real directory (confirmed with `git check-ignore -v`) — so it leaked into that commit. Not a plugin bug (`git add -A` correctly respected `.gitignore`'s actual, documented semantics); the README's recommended `.gitignore` now drops the trailing slash for exactly this reason, and this is precisely the class of miss `paths` (a hard pathspec, indifferent to symlink-vs-directory) doesn't have.
 
 **What this has NOT been run against**, stated plainly rather than assumed: a genuine render/postprocess *failure* mid-flow (the red-cycle hold-back path is covered by the debounce reducer's unit tests and direct tracing against mikser's `output.success` signal, not a live failing build), Gitea (the adapter is unit-tested against mocked responses shaped from Gitea's own route source, not a live instance), and a real merge *conflict* (every live test cycle was a clean fast-forward on the forge side — no divergent `main` to force a genuine PR conflict).
 

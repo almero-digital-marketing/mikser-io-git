@@ -32,10 +32,19 @@ describe('resolveConfig', () => {
         assert.deepEqual(cfg.paths, ['documents', 'layouts', 'files'])
     })
 
+    it('omitting paths means "no scope" — the whole working folder, not a narrower default', () => {
+        // Deliberately distinct from '[\'documents\']': the zero-config
+        // case should match the model's own framing ("the working
+        // folder is the checkout"), not silently narrow to one
+        // collection nobody asked for.
+        const cfg = resolveConfig({ url: 'https://example.com/org/repo.git' })
+        assert.equal(cfg.paths, null)
+    })
+
     it('applies sane defaults for a minimal forge:none config', () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git' })
         assert.equal(cfg.forge, 'none')
-        assert.deepEqual(cfg.paths, ['documents'])
+        assert.equal(cfg.paths, null)
         assert.equal(cfg.targetBranch, 'main')
         assert.equal(cfg.writeBranch, 'mikser')
         assert.equal(cfg.afterMs, 60_000)
