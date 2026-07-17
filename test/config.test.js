@@ -15,10 +15,27 @@ describe('resolveConfig', () => {
         )
     })
 
+    it('rejects an empty paths array', () => {
+        assert.throws(
+            () => resolveConfig({ url: 'https://example.com/org/repo.git', paths: [] }),
+            /`paths` must be a non-empty/,
+        )
+    })
+
+    it('normalizes a single path string to a one-element array', () => {
+        const cfg = resolveConfig({ url: 'https://example.com/org/repo.git', paths: 'layouts' })
+        assert.deepEqual(cfg.paths, ['layouts'])
+    })
+
+    it('accepts an array of paths for multiple collections sharing one checkout', () => {
+        const cfg = resolveConfig({ url: 'https://example.com/org/repo.git', paths: ['documents', 'layouts', 'files'] })
+        assert.deepEqual(cfg.paths, ['documents', 'layouts', 'files'])
+    })
+
     it('applies sane defaults for a minimal forge:none config', () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git' })
         assert.equal(cfg.forge, 'none')
-        assert.equal(cfg.folder, 'documents')
+        assert.deepEqual(cfg.paths, ['documents'])
         assert.equal(cfg.targetBranch, 'main')
         assert.equal(cfg.writeBranch, 'mikser')
         assert.equal(cfg.afterMs, 60_000)
@@ -54,15 +71,15 @@ describe('resolveConfig', () => {
         assert.equal(cfg.apiBase, 'https://ghe.example.com/api/v3')
     })
 
-    it('respects custom branch names, folder, and durations', () => {
+    it('respects custom branch names, paths, and durations', () => {
         const cfg = resolveConfig({
             url: 'https://example.com/org/repo.git',
-            branch: 'live', writeBranch: 'agents', folder: 'content',
+            branch: 'live', writeBranch: 'agents', paths: ['content'],
             after: '30s', maxWait: '5m', pollInterval: '1m',
         })
         assert.equal(cfg.targetBranch, 'live')
         assert.equal(cfg.writeBranch, 'agents')
-        assert.equal(cfg.folder, 'content')
+        assert.deepEqual(cfg.paths, ['content'])
         assert.equal(cfg.afterMs, 30_000)
         assert.equal(cfg.maxWaitMs, 300_000)
         assert.equal(cfg.pollIntervalMs, 60_000)
