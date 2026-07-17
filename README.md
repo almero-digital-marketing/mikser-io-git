@@ -155,6 +155,17 @@ Pull requests, by contrast, are nearly identical between the two — `POST .../p
 - **Every git invocation goes through `execFile` with an argv array — never a shell string.** Commit messages are built from a file count, not raw content, but nothing here ever risks passing arbitrary content through a shell regardless.
 - **The write branch is force-pushed only after a successful promotion**, using `--force-with-lease` (refuses if the remote moved unexpectedly since the last fetch) rather than a bare `--force`. This is safe specifically because `mikser`/`writeBranch` is a branch this plugin owns exclusively — nothing else's history is ever at risk on it.
 
+## Verified end-to-end
+
+The unit suite (53 tests) covers every pure module directly and the forge adapters via an injected `fetchImpl` mock. Beyond that, this has been run against a **real GitHub repo and mikser's own example blog** — not just mocks:
+
+- **The "adopt an existing non-empty folder" recipe** (see [First connect](#first-connect--and-why-it-can-refuse-to-guess)), run by hand exactly as documented, against the real blog's 24 real content files and a fresh throwaway GitHub repo. Worked as written — `git status` afterward showed precisely the expected divergence (the seed file as a deletion, every real file as untracked), and the plugin's first sync picked all of it up correctly.
+- **The full real render pipeline** — the actual `mikser-io-example-blog` config: 13 lifecycle plugins, real layouts, a real CSV fetch from a live Google Sheet, real OpenAI vector embeddings, 30 renders, zero warnings or failures. A genuinely green cycle, not an empty test harness.
+- **Real GitHub pull requests, created and merged by the actual API** — not a mocked response. Two full sync cycles produced two separate PRs (`Promote mikser → main`), both auto-merged; `gh api` confirmed `main` and `mikser` converged on the identical commit SHA after each merge, and the second cycle proved the "reuse an open PR, don't spam a new one" / "open a fresh PR once the last one closed" logic both work correctly across repeated promotions.
+- **One real bug found and fixed this way** (v1.0.1): `git status --porcelain` collapses a brand-new untracked directory into a single line instead of one per file, so the commit message's file count silently undercounted whenever a change arrived as a new directory (a new author's folder, a new content category). Confirmed directly — a real 2-file new directory produced `"content: 1 file(s)"` before the fix — and fixed with `--untracked-files=all`. `git add -A` itself was never affected; only the message text was wrong.
+
+**What this has NOT been run against**, stated plainly rather than assumed: a genuine render/postprocess *failure* mid-flow (the red-cycle hold-back path is covered by the debounce reducer's unit tests and direct tracing against mikser's `output.success` signal, not a live failing build), Gitea (the adapter is unit-tested against mocked responses shaped from Gitea's own route source, not a live instance), and a real merge *conflict* (both live test cycles were clean fast-forwards on the forge side — no divergent `main` to force a genuine PR conflict).
+
 ## What this plugin does NOT do
 
 - **Resolve conflicts.** Ever. A promotion conflict leaves an open PR; an inbound conflict aborts and logs. A human resolves both, always.
