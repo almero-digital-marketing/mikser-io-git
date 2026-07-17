@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-git",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Two-way git sync for mikser-io. Every green cycle commits + pushes the working folder to a dedicated `mikser` branch (durable write log for API/MCP/agent edits) and attempts to merge it into the target branch (`main`) via a pull request; a red cycle (any render/postprocess failure) holds the merge and leaves the PR open for a human to resolve. Inbound changes on the target branch merge back into the working copy via webhook or poll. Forge-portable: GitHub and Gitea adapters, plus a no-forge fast-forward-only floor for any bare remote.",
   "main": "index.js",
   "type": "module",
