@@ -218,3 +218,56 @@ describe('git.js with paths=null (the no-`paths`-configured default)', () => {
         assert.doesNotMatch(status, /dep\.js/)
     })
 })
+
+describe('credential delivery', () => {
+    // The token reaches git through the ENVIRONMENT, not the argument list.
+    // Both carry it for one command and neither persists to .git/config —
+    // but a process's arguments are world-readable and its environment is
+    // not:
+    //
+    //     -r--r--r--   /proc/<pid>/cmdline
+    //     -r--------   /proc/<pid>/environ
+    //
+    // As `-c http.extraheader=...` the base64 credential was readable by any
+    // local user for as long as each fetch/push/clone ran, and could surface
+    // in an err.stderr that a caller then logs. base64 is encoding, not
+    // encryption.
+    let folder
+    before(async () => {
+        folder = await mkdtemp(path.join(tmpdir(), 'mikser-git-auth-'))
+        await git.run(folder, ['init', '-q', '.'])
+    })
+    after(async () => { await rm(folder, { recursive: true, force: true }) })
+
+    it('never puts the credential in the argument list', async () => {
+        // Asserted through git itself: `rev-parse --sq-quote` echoes the
+        // arguments it received, so a credential in argv would appear here.
+        const seen = await git.run(folder, ['rev-parse', '--sq-quote', 'x'], {
+            env: {
+                ...process.env,
+                GIT_CONFIG_COUNT: '1',
+                GIT_CONFIG_KEY_0: 'http.extraheader',
+                GIT_CONFIG_VALUE_0: 'AUTHORIZATION: basic SUPERSECRET',
+            },
+        })
+        assert.ok(!seen.includes('SUPERSECRET'), 'credential must not travel in argv')
+    })
+
+    it('the environment form still reaches git for that one command', async () => {
+        const value = await git.run(folder, ['config', '--get', 'http.extraheader'], {
+            env: {
+                ...process.env,
+                GIT_CONFIG_COUNT: '1',
+                GIT_CONFIG_KEY_0: 'http.extraheader',
+                GIT_CONFIG_VALUE_0: 'AUTHORIZATION: basic ABC123',
+            },
+        })
+        assert.equal(value, 'AUTHORIZATION: basic ABC123')
+    })
+
+    it('and does not persist to .git/config', async () => {
+        // The whole reason the header is passed per-command rather than
+        // written to the remote URL.
+        await assert.rejects(() => git.run(folder, ['config', '--get', 'http.extraheader']))
+    })
+})

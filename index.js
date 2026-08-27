@@ -53,8 +53,23 @@ import { gatherFolderState, decideBootstrap, performClone, performVerify } from 
 import { commitAndPushWriteBranch, promote } from './lib/sync.js'
 import { pullInbound } from './lib/inbound.js'
 import { reduceDebounce, IDLE_DEBOUNCE_STATE } from './lib/debounce.js'
+import { createGitQueue } from './lib/queue.js'
 
 const REANNOUNCE_MS = 30 * 60 * 1000   // re-log a still-open conflict at most every 30 min
+
+// Run a timer body so that nothing it does can end the process.
+//
+// Both schedulers here fire for the life of a watch server, and an async
+// callback that rejects is fatal — Node has treated an unhandled rejection
+// as process-ending since v15, and mikser core installs no handler. The
+// failure mode this prevents is a transient remote error taking down the
+// build AND the site, and looping under a supervisor.
+function withGuard(logger, what, fn) {
+    Promise.resolve()
+        .then(fn)
+        .catch(err => logger?.error('git: %s failed — %s', what, err?.stderr || err?.message || err))
+}
+
 
 export function git(options = {}) {
     const {
@@ -69,6 +84,7 @@ export function git(options = {}) {
         // scopes this instance's reach within it.
         const folder = runtime.options.workingFolder
 
+        const enqueueGit = createGitQueue()
         let debounceState = IDLE_DEBOUNCE_STATE
         let timer = null
         let pollTimer = null
@@ -111,7 +127,7 @@ export function git(options = {}) {
         function scheduleFire(logger) {
             if (timer) clearTimeout(timer)
             const delay = Math.max(0, debounceState.fireAt - Date.now())
-            timer = setTimeout(() => runSyncPass(logger), delay)
+            timer = setTimeout(() => withGuard(logger, 'sync pass', () => enqueueGit(() => runSyncPass(logger))), delay)
             timer.unref?.()
         }
 
@@ -148,9 +164,17 @@ export function git(options = {}) {
             // "later" to pull into. Webhook delivery is not implemented
             // (see README); poll is the only supported inbound trigger.
             if (runtime.options.watch && pollIntervalMs > 0) {
-                pollTimer = setInterval(async () => {
+                pollTimer = setInterval(() => {
                     if (inert) return
-                    await pullInbound(folder, { writeBranch, targetBranch, token, logger })
+                    // Belt AND braces. pullInbound is written not to throw,
+                    // but a timer callback is the one place where being
+                    // wrong about that is fatal rather than noisy: Node has
+                    // treated an unhandled rejection as process-ending since
+                    // v15, and mikser installs no handler. Anything reaching
+                    // here is a bug worth logging, not worth killing the
+                    // build server for.
+                    withGuard(logger, 'inbound poll', () => enqueueGit(() =>
+                        pullInbound(folder, { writeBranch, targetBranch, token, logger })))
                 }, pollIntervalMs)
                 pollTimer.unref?.()
             }
@@ -180,7 +204,7 @@ export function git(options = {}) {
                     logger.warn('git: build had failures (%s) — not syncing', culprits.join(', '))
                     return
                 }
-                await runSyncPass(logger)
+                await enqueueGit(() => runSyncPass(logger))
                 return
             }
 
