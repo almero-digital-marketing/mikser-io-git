@@ -193,6 +193,15 @@ Both forges have *some* direct-merge concept, but they're not the same feature a
 
 Pull requests, by contrast, are nearly identical between the two — `POST .../pulls { title, head, base }` creates one on both GitHub and Gitea. And a PR gives you something the direct-merge endpoints don't: a real conflict surface. A `/merges` 409 is a status code with nowhere to look; a conflicted PR is a page that names the exact files in conflict and offers to resolve them in the forge's own UI. That's a better fit for "leave it open, let a human resolve it" than either forge's direct-merge shortcut.
 
+## Requirements
+
+- **git 2.31 or newer** on the machine running mikser. The auth token is
+  delivered to git through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+  `GIT_CONFIG_VALUE_n`, which older git ignores — it would fall back to
+  unauthenticated access and fail against a private repo. 2.31 shipped in
+  March 2021; `git --version` if unsure.
+- No runtime npm dependencies. Everything goes through the `git` binary.
+
 ## Security
 
 - **The auth token is never written to disk, and never appears in the process's arguments.** It's passed as a one-off `http.extraheader` for the specific git command that needs it (`clone`/`fetch`/`push`/`ls-remote`), delivered through the environment (`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, git 2.31+) rather than as a `-c` argument, and never embedded in the remote URL.
