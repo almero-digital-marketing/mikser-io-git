@@ -37,6 +37,59 @@ mikser's API and MCP endpoints can write to **any registered collection**, not j
 
 **This is meant for a deployment target this plugin (and mikser) exclusively manages — not a developer's actively-edited local checkout.** Bootstrap checks out and holds the write branch for the ENTIRE working folder, not just the collections in `paths`. Point this at a developer's own local clone of the project and it will switch their currently-checked-out branch out from under them — same risk that existed before, just now at the scope of the whole project directory instead of one subfolder. A server deployment where nobody manually runs `git` in that checkout is the intended shape.
 
+## Undo (MCP only)
+
+An agent's request is one **change set**: however many files it wrote, committed
+together, stamped with a `Mikser-Change-Set` trailer and the agent's own summary
+as the subject. `mikser_changes` lists them; `mikser_undo` takes one back.
+
+```
+mikser_changes                     → recent change sets, newest first
+mikser_undo({ id, dryRun: true })  → what it would do, touching nothing
+mikser_undo({ id, dryRun: false }) → apply it
+```
+
+**Only agent writes are undoable.** API writes and human edits are committed
+too — the durable log never drops anything — but into unattributed sweep
+commits with no trailer, and the trailer is the permission boundary. Those
+callers have git; an undo they could reach would be an undo able to remove work
+it never made.
+
+**It removes a contribution, it does not restore a snapshot.** Documents added
+through the API since, and edits made by hand, are kept. The undo lands as an
+ordinary forward commit, so history is never rewritten, the deploy branch is
+never force-pushed, and the undo is itself an undoable change set.
+
+Two independent things stop an undo, and they need different answers:
+
+| | means |
+| --- | --- |
+| `conflict` | a later change edited the same content — it cannot be applied automatically, and no `force` overrides it |
+| `dangling` | something added since references what this undo would REMOVE |
+
+The second is the dangerous one. Git applies it perfectly cleanly and the site
+breaks anyway, because the new document points at a layout that no longer
+exists — so the check runs against the engine's reference index rather than
+against the patch. `force: true` proceeds regardless; nothing bypasses a
+conflict.
+
+A dry run and a refusal never touch the working folder. The patch is tested
+with `git apply --check` against a copy in the system temp dir, because a
+half-applied revert in a deployed checkout means the build stops — an undo that
+takes the site down is worse than the change it was undoing.
+
+### Why the commit scope matters
+
+Staging by folder is what the durable-log sweep does, and it is wrong for a
+change set. If an agent edits one document while a second is created through
+the API a moment later, a folder-scoped `git add` puts both in the agent's
+commit — and undoing the agent then deletes the API's document. Change-set
+commits stage exactly the paths that set wrote, so the commit's contents match
+its label.
+
+Requires the `mcp` plugin. Without it the tools are not registered and the
+plugin behaves exactly as before.
+
 ## Install
 
 ```bash

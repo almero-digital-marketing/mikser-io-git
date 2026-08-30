@@ -71,6 +71,9 @@ function withGuard(logger, what, fn) {
 }
 
 
+import { pendingChangeSets, clearChangeSets } from 'mikser-io'
+import { registerUndoTools } from './lib/mcp.js'
+
 export function git(options = {}) {
     const {
         url, paths, forge, targetBranch, writeBranch,
@@ -95,7 +98,17 @@ export function git(options = {}) {
         async function runSyncPass(logger) {
             debounceState = IDLE_DEBOUNCE_STATE
             try {
-                const { committed } = await commitAndPushWriteBranch(folder, { paths, writeBranch, message, author, token })
+                // Claimed sets are drained only once their paths are actually
+                // committed. A set whose commit throws stays pending and is
+                // retried next pass rather than silently losing attribution.
+                const claimed = pendingChangeSets()
+                const consumed = []
+                const { committed } = await commitAndPushWriteBranch(folder, {
+                    paths, writeBranch, message, author, token,
+                    changeSets: claimed,
+                    onCommitted: (id) => consumed.push(id),
+                })
+                clearChangeSets(consumed)
                 if (!committed) return
                 logger.info('git: committed + pushed to %s', writeBranch)
 
@@ -159,6 +172,18 @@ export function git(options = {}) {
                 paths ? `[${paths.join(', ')}]` : 'the WHOLE working folder (no `paths` set — relying on .gitignore)',
                 targetBranch, forge,
             )
+
+            // Undo is an MCP-only surface. API and human writes are not
+            // attributed and are deliberately not undoable — those callers
+            // have git, and an undo they could reach would be an undo that
+            // could remove someone else's work.
+            if (runtime.options.mcp) {
+                registerUndoTools(runtime.options.mcp, {
+                    folder, writeBranch, runtime, useLogger,
+                    isInert: () => inert,
+                    sync: () => enqueueGit(() => runSyncPass(useLogger())),
+                })
+            }
 
             // Inbound polling — watch mode only; a one-shot build has no
             // "later" to pull into. Webhook delivery is not implemented
