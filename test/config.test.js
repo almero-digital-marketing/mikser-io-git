@@ -3,36 +3,36 @@ import assert from 'node:assert/strict'
 
 import { resolveConfig } from '../lib/config.js'
 
-describe('resolveConfig', () => {
-    it('requires url', () => {
+describe('resolveConfig', async () => {
+    it('requires url', async () => {
         assert.throws(() => resolveConfig({}), /`url` is required/)
     })
 
-    it('rejects an unknown forge', () => {
+    it('rejects an unknown forge', async () => {
         assert.throws(
             () => resolveConfig({ url: 'https://github.com/org/repo.git', forge: 'bitbucket' }),
             /must be "github", "gitea", or "none"/,
         )
     })
 
-    it('rejects an empty paths array', () => {
+    it('rejects an empty paths array', async () => {
         assert.throws(
             () => resolveConfig({ url: 'https://example.com/org/repo.git', paths: [] }),
             /`paths` must be a non-empty/,
         )
     })
 
-    it('normalizes a single path string to a one-element array', () => {
+    it('normalizes a single path string to a one-element array', async () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git', paths: 'layouts' })
         assert.deepEqual(cfg.paths, ['layouts'])
     })
 
-    it('accepts an array of paths for multiple collections sharing one checkout', () => {
+    it('accepts an array of paths for multiple collections sharing one checkout', async () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git', paths: ['documents', 'layouts', 'files'] })
         assert.deepEqual(cfg.paths, ['documents', 'layouts', 'files'])
     })
 
-    it('omitting paths means "no scope" — the whole working folder, not a narrower default', () => {
+    it('omitting paths means "no scope" — the whole working folder, not a narrower default', async () => {
         // Deliberately distinct from '[\'documents\']': the zero-config
         // case should match the model's own framing ("the working
         // folder is the checkout"), not silently narrow to one
@@ -41,7 +41,7 @@ describe('resolveConfig', () => {
         assert.equal(cfg.paths, null)
     })
 
-    it('applies sane defaults for a minimal forge:none config', () => {
+    it('applies sane defaults for a minimal forge:none config', async () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git' })
         assert.equal(cfg.forge, 'none')
         assert.equal(cfg.paths, null)
@@ -56,21 +56,21 @@ describe('resolveConfig', () => {
         assert.equal(cfg.apiBase, undefined)
     })
 
-    it('derives owner/repo/apiBase from the url when forge is github', () => {
+    it('derives owner/repo/apiBase from the url when forge is github', async () => {
         const cfg = resolveConfig({ url: 'https://github.com/almero-digital-marketing/gpoint-content.git', forge: 'github', token: 'x' })
         assert.equal(cfg.owner, 'almero-digital-marketing')
         assert.equal(cfg.repo, 'gpoint-content')
         assert.equal(cfg.apiBase, 'https://api.github.com')
     })
 
-    it('derives owner/repo/apiBase from the url when forge is gitea', () => {
+    it('derives owner/repo/apiBase from the url when forge is gitea', async () => {
         const cfg = resolveConfig({ url: 'https://git.almero.bg/org/content.git', forge: 'gitea', token: 'x' })
         assert.equal(cfg.owner, 'org')
         assert.equal(cfg.repo, 'content')
         assert.equal(cfg.apiBase, 'https://git.almero.bg')
     })
 
-    it('explicit owner/repo/apiBase override the url-derived values', () => {
+    it('explicit owner/repo/apiBase override the url-derived values', async () => {
         const cfg = resolveConfig({
             url: 'https://github.com/org/repo.git', forge: 'github', token: 'x',
             owner: 'other-org', repo: 'other-repo', apiBase: 'https://ghe.example.com/api/v3',
@@ -80,7 +80,7 @@ describe('resolveConfig', () => {
         assert.equal(cfg.apiBase, 'https://ghe.example.com/api/v3')
     })
 
-    it('respects custom branch names, paths, and durations', () => {
+    it('respects custom branch names, paths, and durations', async () => {
         const cfg = resolveConfig({
             url: 'https://example.com/org/repo.git',
             branch: 'live', writeBranch: 'agents', paths: ['content'],
@@ -94,7 +94,7 @@ describe('resolveConfig', () => {
         assert.equal(cfg.pollIntervalMs, 60_000)
     })
 
-    it('the default message builder includes the file count', () => {
+    it('the default message builder includes the file count', async () => {
         const cfg = resolveConfig({ url: 'https://example.com/org/repo.git' })
         assert.equal(cfg.message({ fileCount: 3 }), 'content: 3 file(s) via mikser')
     })

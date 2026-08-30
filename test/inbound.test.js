@@ -38,7 +38,7 @@ async function commit(folder, file, content, message) {
     await git.run(folder, ['-c', 'user.email=t@t', '-c', 'user.name=T', 'commit', '-m', message])
 }
 
-describe('pullInbound against real repositories', () => {
+describe('pullInbound against real repositories', async () => {
     let root
     before(async () => { root = await mkdtemp(path.join(tmpdir(), 'mikser-inbound-')) })
     after(async () => { await rm(root, { recursive: true, force: true }) })

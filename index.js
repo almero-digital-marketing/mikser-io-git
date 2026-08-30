@@ -107,7 +107,7 @@ export function git(options = {}) {
                 // split one request across two commits — which then takes two
                 // undos to take back.
                 const now = Date.now()
-                const claimed = pendingChangeSets().filter(set =>
+                const claimed = (await pendingChangeSets()).filter(set =>
                     set.closed
                     || (set.updatedAt ?? set.startedAt) + changeSetAfterMs <= now
                     // The ceiling, enforced here too: a set that has waited
@@ -120,7 +120,7 @@ export function git(options = {}) {
                 // What a not-yet-ready set has written. Held back from the
                 // sweep so the set can still commit it under its own name.
                 const claimedIds = new Set(claimed.map(set => set.id))
-                const reserved = pendingChangeSets()
+                const reserved = (await pendingChangeSets())
                     .filter(set => !claimedIds.has(set.id))
                     .flatMap(set => set.paths)
 
@@ -132,18 +132,22 @@ export function git(options = {}) {
                     // retried: the diff is empty and will stay empty, so a
                     // retry costs a pass and leaves a null that looks like a
                     // fault.
-                    onSettled: (id, reason) => {
-                        settled.push(id)
-                        markChangeSetSettled(id, reason)
-                    },
+                    onSettled: (id, reason) => settled.push({ id, reason }),
                     onFailed: (id, err) => {
-                        failed.push(id)
-                        markChangeSetFailed(id, err)
+                        failed.push({ id, err })
                         logger.warn('git: change set %s could not be committed — %s',
                             id, err?.stderr || err?.message || err)
                     },
                 })
-                for (const { id, sha } of consumed) markChangeSetsRecorded([id], sha)
+
+                // Recorded after the commit returns rather than from inside
+                // its callbacks. The marks are async now, and a promise
+                // started in a sync callback would still be in flight when the
+                // pass ends — leaving a committed set looking pending, and
+                // re-committed on the next pass.
+                for (const { id, sha } of consumed) await markChangeSetsRecorded([id], sha)
+                for (const { id, reason } of settled) await markChangeSetSettled(id, reason)
+                for (const { id, err } of failed) await markChangeSetFailed(id, err)
                 // Said every pass, so a stall is visible in the log instead of
                 // inferred from a column of nulls.
                 if (claimed.length) {
@@ -184,9 +188,9 @@ export function git(options = {}) {
         // When the earliest pending change set wants to be committed, or null
         // when none is pending. Closed sets are ready now; open ones once they
         // have been quiet for changeSetAfterMs.
-        function soonestChangeSetDeadline(now) {
+        async function soonestChangeSetDeadline(now) {
             let soonest = null
-            for (const set of pendingChangeSets()) {
+            for (const set of await pendingChangeSets()) {
                 const at = set.closed
                     ? now
                     // Whichever comes first: quiet since the set last grew, or
@@ -222,7 +226,7 @@ export function git(options = {}) {
             watchdog = setInterval(() => {
                 if (inert) return
                 withGuard(logger, 'sync watchdog', async () => {
-                    const owed = pendingChangeSets()
+                    const owed = await pendingChangeSets()
                     if (!owed.length) return
                     const now = Date.now()
                     const due = owed.some(set =>
@@ -365,7 +369,7 @@ export function git(options = {}) {
             // while the policy looks like it is working. The deadline belongs
             // to the change set: when IT last grew, not when anything last
             // happened.
-            const readyAt = soonestChangeSetDeadline(now)
+            const readyAt = await soonestChangeSetDeadline(now)
             if (readyAt !== null) {
                 debounceState = {
                     ...debounceState,

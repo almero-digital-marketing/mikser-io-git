@@ -11,20 +11,20 @@ import { reduceDebounce, IDLE_DEBOUNCE_STATE } from '../lib/debounce.js'
 
 const CFG = { afterMs: 60_000, maxWaitMs: 600_000 }   // 1m / 10m, matches the plugin's defaults
 
-describe('reduceDebounce', () => {
-    it('a single green event fires after `after`', () => {
+describe('reduceDebounce', async () => {
+    it('a single green event fires after `after`', async () => {
         const s = reduceDebounce(IDLE_DEBOUNCE_STATE, { type: 'green', now: 1000 }, CFG)
         assert.equal(s.pendingSince, 1000)
         assert.equal(s.fireAt, 1000 + CFG.afterMs)
     })
 
-    it('a red event clears the window outright', () => {
+    it('a red event clears the window outright', async () => {
         const afterGreen = reduceDebounce(IDLE_DEBOUNCE_STATE, { type: 'green', now: 1000 }, CFG)
         const afterRed = reduceDebounce(afterGreen, { type: 'red', now: 2000 }, CFG)
         assert.deepEqual(afterRed, IDLE_DEBOUNCE_STATE)
     })
 
-    it('a later green event pushes fireAt out again (trailing debounce)', () => {
+    it('a later green event pushes fireAt out again (trailing debounce)', async () => {
         let s = reduceDebounce(IDLE_DEBOUNCE_STATE, { type: 'green', now: 0 }, CFG)
         s = reduceDebounce(s, { type: 'green', now: 30_000 }, CFG)
         // pendingSince stays at the FIRST green (0); fireAt tracks the latest green + after,
@@ -33,7 +33,7 @@ describe('reduceDebounce', () => {
         assert.equal(s.fireAt, 30_000 + CFG.afterMs)
     })
 
-    it('a steady stream of green events is bounded by maxWait — never starves forever', () => {
+    it('a steady stream of green events is bounded by maxWait — never starves forever', async () => {
         let s = reduceDebounce(IDLE_DEBOUNCE_STATE, { type: 'green', now: 0 }, CFG)
         // Green every 30s, well under the 60s `after` window, for 20 minutes —
         // a pure trailing debounce would never fire.
@@ -45,7 +45,7 @@ describe('reduceDebounce', () => {
         assert.equal(s.fireAt, CFG.maxWaitMs)
     })
 
-    it('a red event after being interrupted then going green again starts a FRESH window', () => {
+    it('a red event after being interrupted then going green again starts a FRESH window', async () => {
         let s = reduceDebounce(IDLE_DEBOUNCE_STATE, { type: 'green', now: 0 }, CFG)
         s = reduceDebounce(s, { type: 'red', now: 100_000 }, CFG)
         s = reduceDebounce(s, { type: 'green', now: 200_000 }, CFG)

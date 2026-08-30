@@ -49,8 +49,8 @@ const commit = async () => {
         await commitAndPushWriteBranch(folder, {
             paths: ['documents'], writeBranch: 'mikser',
             message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
-            changeSets: pendingChangeSets(),
-            onCommitted: (id, sha) => markChangeSetsRecorded([id], sha),
+            changeSets: await pendingChangeSets(),
+            onCommitted: async (id, sha) => markChangeSetsRecorded([id], sha),
         })
     } catch { /* no remote */ }
 }
@@ -60,10 +60,10 @@ const agentWrite = (changeSet, summary, rel, content) =>
     withChangeSet({ changeSet, summary, principal: 'agent' },
         () => useCollection(runtime, 'documents').write(rel, content))
 
-describe('change-set commits', () => {
+describe('change-set commits', async () => {
     it('stages only the paths its own change set wrote', async () => {
         runtime.options = { ...runtime.options, workingFolder: folder, documentsFolder: path.join(folder, 'documents') }
-        forgetAllChangeSets()
+        await forgetAllChangeSets()
         // The agent writes one file, as a mutating tool would.
         await agentWrite('cs-1', 'Agent edits agent.md', 'agent.md', 'agent v1\n')
         // Before the commit fires, something else creates a document.
@@ -93,7 +93,7 @@ describe('change-set commits', () => {
     })
 })
 
-describe('undoing one change set', () => {
+describe('undoing one change set', async () => {
     it('lists the set an agent was handed, and only that', async () => {
         const sets = await listChangeSets(folder, { limit: 10 })
         assert.deepEqual(sets.map(s => s.id), ['cs-1'],
@@ -117,8 +117,8 @@ describe('undoing one change set', () => {
     })
 })
 
-describe('what a patch would touch', () => {
-    it('separates edits from removals', () => {
+describe('what a patch would touch', async () => {
+    it('separates edits from removals', async () => {
         const patch = [
             'diff --git a/documents/kept.md b/documents/kept.md',
             'index 111..222 100644',
@@ -134,8 +134,8 @@ describe('what a patch would touch', () => {
     })
 })
 
-describe('trailer parsing', () => {
-    it('groups commits belonging to one set', () => {
+describe('trailer parsing', async () => {
+    it('groups commits belonging to one set', async () => {
         const log = [
             ['b2', '1700000200', 'Agent edits', 'Mikser-Change-Set: cs-9\nMikser-Principal: agent'].join('\x1f'),
             ['b1', '1700000100', 'Agent edits', 'Mikser-Change-Set: cs-9'].join('\x1f'),
@@ -146,12 +146,12 @@ describe('trailer parsing', () => {
         assert.deepEqual(set.commits, ['b1', 'b2'], 'oldest first, so a revert can walk them backwards')
     })
 
-    it('ignores commits with no change set', () => {
+    it('ignores commits with no change set', async () => {
         const log = ['abc', '1700000000', 'content: 2 file(s) via mikser', ''].join('\x1f') + '\x1e'
         assert.deepEqual(parseChangeSetLog(log), [])
     })
 
-    it('round-trips what it writes', () => {
+    it('round-trips what it writes', async () => {
         const trailers = changeSetTrailers({ id: 'cs-7', principal: 'agent', undoOf: 'cs-3' })
         const log = ['sha', '1700000000', 'Undo: something', trailers].join('\x1f') + '\x1e'
         const [set] = parseChangeSetLog(log)
@@ -164,7 +164,7 @@ describe('trailer parsing', () => {
 // what the agent's change set created. Nothing conflicts textually — different
 // files — so git reverts cleanly and the site breaks anyway. Only the
 // reference graph can see it coming.
-describe('undo that would leave references dangling', () => {
+describe('undo that would leave references dangling', async () => {
     const withCatalog = (entities, inbound) => {
         runtime.options = { ...runtime.options, workingFolder: folder }
         runtime.catalog = { byId: new Map(entities.map(e => [e.id, e])) }
@@ -213,7 +213,7 @@ describe('undo that would leave references dangling', () => {
 // call should block on — and Node has ended the process on an unhandled
 // rejection since v15. mikser installs no handler, so a floating promise here
 // is fatal rather than noisy.
-describe('the sync nudge cannot kill the process', () => {
+describe('the sync nudge cannot kill the process', async () => {
     let own
 
     // Its own repo with a fresh, still-applicable change set. Reusing the
@@ -232,12 +232,12 @@ describe('the sync nudge cannot kill the process', () => {
         // — resolution goes through the log now, so a commit alone is not a
         // change set.
         runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
-        forgetAllChangeSets()
+        await forgetAllChangeSets()
         await withChangeSet({ changeSet: 'cs-sync', summary: 'Agent edit', principal: 'agent' },
             () => useCollection(runtime, 'documents').write('a.md', 'v1\n'))
         await git.addPaths(own, ['documents/a.md'])
         await git.run(own, ['commit', '-m', 'Agent edit\n\nMikser-Change-Set: cs-sync'])
-        markChangeSetsRecorded(['cs-sync'], await git.revParse(own, 'HEAD'))
+        await markChangeSetsRecorded(['cs-sync'], await git.revParse(own, 'HEAD'))
         return own
     }
 
@@ -275,7 +275,7 @@ describe('the sync nudge cannot kill the process', () => {
     it('survives a sync that throws synchronously', async () => {
         const folder = await fixture()
         runtime.options = { ...runtime.options, workingFolder: folder }
-        const tools = toolsWith(() => { throw new Error('queue exploded') }, folder)
+        const tools = toolsWith(async () => { throw new Error('queue exploded') }, folder)
         const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
         assert.equal(r.ok, true, 'the tool still answers')
     })
@@ -283,7 +283,7 @@ describe('the sync nudge cannot kill the process', () => {
 
 // The round trip an agent actually makes, and the refusals that must not all
 // collapse into "unknown".
-describe('the id an agent is handed is a handle to something', () => {
+describe('the id an agent is handed is a handle to something', async () => {
     let own
 
     const fixture = async () => {
@@ -296,7 +296,7 @@ describe('the id an agent is handed is a handle to something', () => {
         await git.run(own, ['add', '-A'])
         await git.run(own, ['commit', '-m', 'seed'])
         runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
-        forgetAllChangeSets()
+        await forgetAllChangeSets()
         return own
     }
     const sync = async (folder) => {
@@ -304,8 +304,8 @@ describe('the id an agent is handed is a handle to something', () => {
             await commitAndPushWriteBranch(folder, {
                 paths: ['documents'], writeBranch: 'mikser',
                 message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
-                changeSets: pendingChangeSets(),
-                onCommitted: (id, sha) => markChangeSetsRecorded([id], sha),
+                changeSets: await pendingChangeSets(),
+                onCommitted: async (id, sha) => markChangeSetsRecorded([id], sha),
             })
         } catch { /* no remote */ }
     }
@@ -402,7 +402,7 @@ describe('the id an agent is handed is a handle to something', () => {
 // that writes and immediately asks to undo is inside it every time. The
 // refusal has to say how long, or "not committed yet" reads as "never" and
 // the whole feature looks broken.
-describe('a pending change set says when it will be committable', () => {
+describe('a pending change set says when it will be committable', async () => {
     it('reports the commit window rather than a bare refusal', async () => {
         const own = await mkdtemp(path.join(tmpdir(), 'mikser-undo-win-'))
         try {
@@ -415,7 +415,7 @@ describe('a pending change set says when it will be committable', () => {
             await git.run(own, ['commit', '-m', 'seed'])
 
             runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
-            forgetAllChangeSets()
+            await forgetAllChangeSets()
             await withChangeSet({ changeSet: 'cs-pending', summary: 'Just written', principal: 'agent' },
                 () => useCollection(runtime, 'documents').write('p.md', 'x\n'))
 

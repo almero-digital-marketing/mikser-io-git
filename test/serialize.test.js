@@ -19,7 +19,7 @@ import { createGitQueue } from '../lib/queue.js'
 
 const tick = (ms) => new Promise(r => setTimeout(r, ms))
 
-describe('createGitQueue', () => {
+describe('createGitQueue', async () => {
     it('never runs two operations at once', async () => {
         const enqueue = createGitQueue()
         let active = 0
@@ -62,7 +62,7 @@ describe('createGitQueue', () => {
         // The chain swallows internally so a rejected operation cannot end
         // the process through the tail; the caller's own guard reports it.
         const enqueue = createGitQueue()
-        enqueue(async () => { throw new Error('ignored by design') }).catch(() => {})
+        enqueue(async () => { throw new Error('ignored by design') }).catch(async () => {})
         await tick(10)
         let ran = false
         await enqueue(async () => { ran = true })

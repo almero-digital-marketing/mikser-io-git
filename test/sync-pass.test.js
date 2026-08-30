@@ -33,7 +33,7 @@ before(async () => {
     runtime.options = { ...runtime.options, workingFolder: folder, documentsFolder: path.join(folder, 'documents') }
 })
 after(async () => { if (folder) await rm(folder, { recursive: true, force: true }) })
-beforeEach(() => forgetAllChangeSets())
+beforeEach(async () => forgetAllChangeSets())
 
 const write = (id, summary, rel, content) =>
     withChangeSet({ changeSet: id, summary, principal: 'agent', closeOnReturn: true },
@@ -45,23 +45,23 @@ const pass = async () => {
         await commitAndPushWriteBranch(folder, {
             paths: ['documents'], writeBranch: 'mikser',
             message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
-            changeSets: pendingChangeSets(),
-            onCommitted: (id, sha) => { committed.push(id); markChangeSetsRecorded([id], sha) },
-            onFailed: (id, err) => { failed.push(id); markChangeSetFailed(id, err) },
-            onSettled: (id, reason) => { settled.push(id); markChangeSetSettled(id, reason) },
+            changeSets: await pendingChangeSets(),
+            onCommitted: async (id, sha) => { committed.push(id); await markChangeSetsRecorded([id], sha) },
+            onFailed: async (id, err) => { failed.push(id); await markChangeSetFailed(id, err) },
+            onSettled: async (id, reason) => { settled.push(id); await markChangeSetSettled(id, reason) },
         })
     } catch { /* no remote to push to */ }
     return { committed, failed, settled }
 }
 
-describe('every pending change set reaches a commit', () => {
+describe('every pending change set reaches a commit', async () => {
     it('commits ten writes in one pass, and gives each its own commit', async () => {
         // The reported shape: the first set committed and nothing after it.
         for (let i = 0; i < 10; i++) await write(`cs-${i}`, `Write ${i}`, `doc-${i}.md`, `body ${i}\n`)
         const { committed } = await pass()
         assert.equal(committed.length, 10, 'all ten, in one pass')
 
-        const listed = listChangeSets({ limit: 20 })
+        const listed = await listChangeSets({ limit: 20 })
         assert.deepEqual(listed.filter(s => !s.recordedAs), [], 'nothing may be left at committed: null')
         // Asserted here rather than in a second test: the log is cleared
         // between tests, so a follow-up test would be reading an empty log and
@@ -70,7 +70,7 @@ describe('every pending change set reaches a commit', () => {
     })
 })
 
-describe('one failing change set does not halt the rest', () => {
+describe('one failing change set does not halt the rest', async () => {
     it('records the error and still commits the sets around it', async () => {
         // A real failure, not a mock: the set claims a path that is gone by
         // the time it is staged, which is what a concurrent delete looks like.
@@ -86,7 +86,7 @@ describe('one failing change set does not halt the rest', () => {
         assert.ok(committed.includes('cs-ok-1'), 'the set before the failure commits')
         assert.ok(committed.includes('cs-ok-2'), 'and so does the one after it')
 
-        const vanished = listChangeSets({ limit: 20 }).find(s => s.id === 'cs-vanished')
+        const vanished = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-vanished')
         if (failed.includes('cs-vanished')) {
             assert.ok(vanished.commitError, 'a failed set carries its reason')
         } else {
@@ -98,8 +98,8 @@ describe('one failing change set does not halt the rest', () => {
 
     it('a failed set shows its reason rather than a bare null', async () => {
         await write('cs-fails', 'Will not commit', 'f.md', 'x\n')
-        markChangeSetFailed('cs-fails', new Error('hook rejected the commit'))
-        const set = listChangeSets({ limit: 20 }).find(s => s.id === 'cs-fails')
+        await markChangeSetFailed('cs-fails', new Error('hook rejected the commit'))
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-fails')
         assert.equal(set.recordedAs, null)
         assert.match(set.commitError, /hook rejected/)
         assert.equal(set.commitAttempts, 1, 'and how many times it has been tried')
@@ -107,24 +107,24 @@ describe('one failing change set does not halt the rest', () => {
         // A failure is retried, so a later success must not leave a stale
         // reason beside a real commit. Asserted in the same test because the
         // log does not survive to the next one.
-        markChangeSetsRecorded(['cs-fails'], 'abc1234')
-        const after = listChangeSets({ limit: 20 }).find(s => s.id === 'cs-fails')
+        await markChangeSetsRecorded(['cs-fails'], 'abc1234')
+        const after = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-fails')
         assert.equal(after.commitError, null)
         assert.equal(after.recordedAs, 'abc1234')
     })
 
-    it('never leaves a set both uncommitted and unexplained past the ceiling', () => {
+    it('never leaves a set both uncommitted and unexplained past the ceiling', async () => {
         // The combination the report calls impossible: old, no commit, no
         // reason. One of the two must always be present.
-        const stale = listChangeSets({ limit: 200 })
+        const stale = (await listChangeSets({ limit: 200 }))
             .filter(s => Date.now() - s.startedAt > 600_000)
             .filter(s => !s.recordedAs && !s.commitError)
         assert.deepEqual(stale, [])
     })
 })
 
-describe('bounded operations', () => {
-    it('gives every git command a timeout', () => {
+describe('bounded operations', async () => {
+    it('gives every git command a timeout', async () => {
         // The root cause. One queue serialises every git operation, so a
         // command that never returns blocks all later passes and the inbound
         // poll — permanently, with no error anywhere.
@@ -140,7 +140,7 @@ describe('bounded operations', () => {
 // cancelled: an undo of a create, and probes that added then removed their own
 // files. git correctly made no commit, so neither callback fired, nothing
 // drained them, and they were re-claimed forever.
-describe('a set with no net diff', () => {
+describe('a set with no net diff', async () => {
     it('drains instead of being re-claimed every pass', async () => {
         // A TRACKED file changed and then changed back — the shape the live
         // instance hit, where an undo restored what a commit had added. git
@@ -157,13 +157,13 @@ describe('a set with no net diff', () => {
         assert.ok(first.settled.includes('cs-empty'), 'so it needs the third outcome')
 
         // The bug: still claimed on the next pass, and every pass after.
-        assert.deepEqual(pendingChangeSets().map(s => s.id), [],
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), [],
             'a drained set must not come back')
 
         // Asserted here, not in a following test: the log is cleared between
         // tests, so a second test would read an empty log and pass for the
         // wrong reason.
-        const set = listChangeSets({ limit: 20 }).find(s => s.id === 'cs-empty')
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-empty')
         assert.equal(set.recordedAs, null, 'there is genuinely no commit')
         assert.equal(set.outcome, 'empty', 'and the null is explained rather than a mystery')
     })
@@ -178,7 +178,7 @@ describe('a set with no net diff', () => {
         assert.ok(committed.includes('cs-before'))
         assert.ok(committed.includes('cs-after'))
         assert.ok(settled.includes('cs-void'))
-        assert.deepEqual(pendingChangeSets().map(s => s.id), [], 'the pass drains completely')
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), [], 'the pass drains completely')
     })
 
     it('drains a set that wrote outside the paths this instance versions', async () => {
@@ -187,7 +187,7 @@ describe('a set with no net diff', () => {
         recordChangeSetWrite({ changeSet: 'cs-elsewhere', summary: 'Outside', uri: path.join(folder, 'not-versioned', 'x.md') })
         const { settled } = await pass()
         assert.ok(settled.includes('cs-elsewhere'))
-        assert.deepEqual(pendingChangeSets().map(s => s.id), [])
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), [])
     })
 })
 
@@ -200,20 +200,20 @@ describe('a set with no net diff', () => {
 // claimed, the sweep took its work, and by the time the set was ready there
 // was nothing left to commit. Its changes are in git under a commit that does
 // not name it, so it can never be undone.
-describe('an open change set keeps its own work', () => {
+describe('an open change set keeps its own work', async () => {
     const passReserving = async () => {
         const out = { committed: [], settled: [] }
-        const claimed = pendingChangeSets().filter(s => s.closed)
+        const claimed = (await pendingChangeSets()).filter(s => s.closed)
         const claimedIds = new Set(claimed.map(s => s.id))
-        const reserved = pendingChangeSets().filter(s => !claimedIds.has(s.id)).flatMap(s => s.paths)
+        const reserved = (await pendingChangeSets()).filter(s => !claimedIds.has(s.id)).flatMap(s => s.paths)
         try {
             await commitAndPushWriteBranch(folder, {
                 paths: ['documents'], writeBranch: 'mikser',
                 message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
                 changeSets: claimed, reserved,
-                onCommitted: (id, sha) => { out.committed.push(id); markChangeSetsRecorded([id], sha) },
+                onCommitted: async (id, sha) => { out.committed.push(id); await markChangeSetsRecorded([id], sha) },
                 onFailed: () => {},
-                onSettled: (id, r) => { out.settled.push(id); markChangeSetSettled(id, r) },
+                onSettled: async (id, r) => { out.settled.push(id); await markChangeSetSettled(id, r) },
             })
         } catch { /* no remote */ }
         return out

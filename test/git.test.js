@@ -14,24 +14,24 @@ import path from 'node:path'
 
 import * as git from '../lib/git.js'
 
-describe('isNonFastForwardError', () => {
-    it('recognizes the common rejection messages', () => {
+describe('isNonFastForwardError', async () => {
+    it('recognizes the common rejection messages', async () => {
         assert.ok(git.isNonFastForwardError({ stderr: '! [rejected] main -> main (non-fast-forward)' }))
         assert.ok(git.isNonFastForwardError({ message: 'failed to push some refs (fetch first)' }))
         assert.ok(git.isNonFastForwardError({ stderr: 'Updates were rejected because the tip of your current branch is behind' }))
     })
 
-    it('does not misclassify an unrelated error', () => {
+    it('does not misclassify an unrelated error', async () => {
         assert.equal(git.isNonFastForwardError({ message: 'fatal: repository not found' }), false)
     })
 
-    it('handles a bare/malformed error object without throwing', () => {
+    it('handles a bare/malformed error object without throwing', async () => {
         assert.equal(git.isNonFastForwardError({}), false)
         assert.equal(git.isNonFastForwardError(null), false)
     })
 })
 
-describe('git.js against a real local repo', () => {
+describe('git.js against a real local repo', async () => {
     let dir
 
     before(async () => {
@@ -101,7 +101,7 @@ describe('git.js against a real local repo', () => {
 // the SAME checkout this plugin manages, alongside collections it
 // SHOULD auto-commit (documents/, layouts/), as long as every git
 // operation is scoped to `paths`. Proven directly here, not assumed.
-describe('git.js pathspec scoping (paths param)', () => {
+describe('git.js pathspec scoping (paths param)', async () => {
     let dir
 
     before(async () => {
@@ -179,7 +179,7 @@ describe('git.js pathspec scoping (paths param)', () => {
 // was configured, and .gitignore (not a pathspec) is what would keep
 // node_modules/.env out in that case. Distinct from the scoped-paths suite
 // above, which proves the OPPOSITE guarantee when paths IS given.
-describe('git.js with paths=null (the no-`paths`-configured default)', () => {
+describe('git.js with paths=null (the no-`paths`-configured default)', async () => {
     let dir
 
     before(async () => {
@@ -219,7 +219,7 @@ describe('git.js with paths=null (the no-`paths`-configured default)', () => {
     })
 })
 
-describe('credential delivery', () => {
+describe('credential delivery', async () => {
     // The token reaches git through the ENVIRONMENT, not the argument list.
     // Both carry it for one command and neither persists to .git/config —
     // but a process's arguments are world-readable and its environment is

@@ -3,33 +3,33 @@ import assert from 'node:assert/strict'
 
 import { parseRepoUrl } from '../lib/repo-url.js'
 
-describe('parseRepoUrl', () => {
-    it('parses a github.com URL and defaults apiOrigin to api.github.com', () => {
+describe('parseRepoUrl', async () => {
+    it('parses a github.com URL and defaults apiOrigin to api.github.com', async () => {
         const r = parseRepoUrl('https://github.com/almero-digital-marketing/gpoint-content.git')
         assert.deepEqual(r, { owner: 'almero-digital-marketing', repo: 'gpoint-content', apiOrigin: 'https://api.github.com' })
     })
 
-    it('parses without the .git suffix identically', () => {
+    it('parses without the .git suffix identically', async () => {
         const r = parseRepoUrl('https://github.com/org/repo')
         assert.equal(r.owner, 'org')
         assert.equal(r.repo, 'repo')
     })
 
-    it('a self-hosted Gitea URL uses its own origin as apiOrigin (adapter appends /api/v1)', () => {
+    it('a self-hosted Gitea URL uses its own origin as apiOrigin (adapter appends /api/v1)', async () => {
         const r = parseRepoUrl('https://git.almero.bg/org/content.git')
         assert.deepEqual(r, { owner: 'org', repo: 'content', apiOrigin: 'https://git.almero.bg' })
     })
 
-    it('tolerates a trailing slash', () => {
+    it('tolerates a trailing slash', async () => {
         const r = parseRepoUrl('https://git.almero.bg/org/content/')
         assert.equal(r.repo, 'content')
     })
 
-    it('throws on a URL with no owner/repo path', () => {
+    it('throws on a URL with no owner/repo path', async () => {
         assert.throws(() => parseRepoUrl('https://github.com/'), /cannot derive owner\/repo/)
     })
 
-    it('throws on garbage input', () => {
+    it('throws on garbage input', async () => {
         assert.throws(() => parseRepoUrl('not a url'), /not a valid URL/)
     })
 })
