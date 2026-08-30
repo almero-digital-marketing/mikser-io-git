@@ -71,7 +71,7 @@ function withGuard(logger, what, fn) {
 }
 
 
-import { pendingChangeSets, markChangeSetsRecorded } from 'mikser-io'
+import { pendingChangeSets, markChangeSetsRecorded, markChangeSetFailed } from 'mikser-io'
 import { registerUndoTools } from './lib/mcp.js'
 
 export function git(options = {}) {
@@ -91,6 +91,7 @@ export function git(options = {}) {
         let debounceState = IDLE_DEBOUNCE_STATE
         let timer = null
         let pollTimer = null
+        let watchdog = null
         let lastPromoteFailureReason = null
         let lastPromoteFailureLoggedAt = 0
         let inert = false   // set true on a bootstrap refusal; the plugin stops touching the folder for the rest of this process
@@ -107,14 +108,32 @@ export function git(options = {}) {
                 // undos to take back.
                 const now = Date.now()
                 const claimed = pendingChangeSets().filter(set =>
-                    set.closed || (set.updatedAt ?? set.startedAt) + changeSetAfterMs <= now)
+                    set.closed
+                    || (set.updatedAt ?? set.startedAt) + changeSetAfterMs <= now
+                    // The ceiling, enforced here too: a set that has waited
+                    // this long is committed whether or not anything went
+                    // quiet.
+                    || set.startedAt + maxWaitMs <= now)
                 const consumed = []
+                const failed = []
                 const { committed } = await commitAndPushWriteBranch(folder, {
                     paths, writeBranch, message, author, token,
                     changeSets: claimed,
                     onCommitted: (id, sha) => consumed.push({ id, sha }),
+                    onFailed: (id, err) => {
+                        failed.push(id)
+                        markChangeSetFailed(id, err)
+                        logger.warn('git: change set %s could not be committed — %s',
+                            id, err?.stderr || err?.message || err)
+                    },
                 })
                 for (const { id, sha } of consumed) markChangeSetsRecorded([id], sha)
+                // Said every pass, so a stall is visible in the log instead of
+                // inferred from a column of nulls.
+                if (claimed.length || failed.length) {
+                    logger.info('git: sync pass — %d change set(s), %d committed, %d failed',
+                        claimed.length, consumed.length, failed.length)
+                }
                 if (!committed) return
                 logger.info('git: committed + pushed to %s', writeBranch)
 
@@ -149,7 +168,13 @@ export function git(options = {}) {
         function soonestChangeSetDeadline(now) {
             let soonest = null
             for (const set of pendingChangeSets()) {
-                const at = set.closed ? now : (set.updatedAt ?? set.startedAt) + changeSetAfterMs
+                const at = set.closed
+                    ? now
+                    // Whichever comes first: quiet since the set last grew, or
+                    // the ceiling measured from when it started. The ceiling
+                    // is what makes a busy server still commit, so it is a
+                    // real bound here rather than a sentence in a description.
+                    : Math.min((set.updatedAt ?? set.startedAt) + changeSetAfterMs, set.startedAt + maxWaitMs)
                 if (soonest === null || at < soonest) soonest = at
             }
             return soonest
@@ -160,6 +185,35 @@ export function git(options = {}) {
             const delay = Math.max(0, debounceState.fireAt - Date.now())
             timer = setTimeout(() => withGuard(logger, 'sync pass', () => enqueueGit(() => runSyncPass(logger))), delay)
             timer.unref?.()
+        }
+
+        // A tick that does not depend on a build cycle happening.
+        //
+        // scheduleFire is armed from onFinalize, so every re-arm needed a
+        // cycle to run. A pass that threw, a queue that stalled, or simply no
+        // further cycle left the loop with nothing scheduled and no way back —
+        // one commit at startup and then silence, which is exactly what a dead
+        // scheduler looks like from outside.
+        //
+        // This runs regardless, checks whether anything is owed, and is the
+        // only thing that guarantees the ceiling is honoured: a set older than
+        // maxWaitMs is committed whether or not the site ever went quiet.
+        function startWatchdog(logger) {
+            if (watchdog) return
+            watchdog = setInterval(() => {
+                if (inert) return
+                withGuard(logger, 'sync watchdog', async () => {
+                    const owed = pendingChangeSets()
+                    if (!owed.length) return
+                    const now = Date.now()
+                    const due = owed.some(set =>
+                        set.closed
+                        || (set.updatedAt ?? set.startedAt) + changeSetAfterMs <= now
+                        || set.startedAt + maxWaitMs <= now)
+                    if (due) await enqueueGit(() => runSyncPass(logger))
+                })
+            }, Math.max(1_000, Math.min(changeSetAfterMs, 30_000)))
+            watchdog.unref?.()
         }
 
         onLoaded(async () => {
@@ -190,6 +244,10 @@ export function git(options = {}) {
                 paths ? `[${paths.join(', ')}]` : 'the WHOLE working folder (no `paths` set — relying on .gitignore)',
                 targetBranch, forge,
             )
+
+            // Runs in watch mode only: a one-shot build syncs at the end of
+            // its single cycle and then exits, so there is no later to guard.
+            if (runtime.options.watch) startWatchdog(logger)
 
             // Undo is an MCP-only surface. API and human writes are not
             // attributed and are deliberately not undoable — those callers
@@ -279,8 +337,22 @@ export function git(options = {}) {
             // Closed means the writer said it was finished, so there is
             // nothing to wait for. Open means it might still grow, so it waits
             // out its own much shorter quiet period instead.
+            // Measured from the WRITES, not from the cycle.
+            //
+            // A cycle runs for anything that touches the engine, including
+            // work with no change set behind it. Letting that push the
+            // deadline out means a server with an agent connected — issuing
+            // reads, previews, renders — never goes quiet and never commits,
+            // while the policy looks like it is working. The deadline belongs
+            // to the change set: when IT last grew, not when anything last
+            // happened.
             const readyAt = soonestChangeSetDeadline(now)
-            if (readyAt !== null) debounceState = { ...debounceState, fireAt: Math.min(debounceState.fireAt, readyAt) }
+            if (readyAt !== null) {
+                debounceState = {
+                    ...debounceState,
+                    fireAt: debounceState.fireAt === null ? readyAt : Math.min(debounceState.fireAt, readyAt),
+                }
+            }
             scheduleFire(logger)
         })
     }
