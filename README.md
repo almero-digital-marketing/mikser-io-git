@@ -37,6 +37,28 @@ mikser's API and MCP endpoints can write to **any registered collection**, not j
 
 **This is meant for a deployment target this plugin (and mikser) exclusively manages — not a developer's actively-edited local checkout.** Bootstrap checks out and holds the write branch for the ENTIRE working folder, not just the collections in `paths`. Point this at a developer's own local clone of the project and it will switch their currently-checked-out branch out from under them — same risk that existed before, just now at the scope of the whole project directory instead of one subfolder. A server deployment where nobody manually runs `git` in that checkout is the intended shape.
 
+## When a change is committed
+
+Two clocks, because two kinds of writer need different ones.
+
+| | waits for |
+| --- | --- |
+| a change set the writer **closed** | nothing — committed on the next cycle |
+| a change set still **open** | `changeSetAfter` of quiet (default 3s) |
+| everything else (WebDAV, hand edits, API) | `after` of quiet (default 60s) |
+
+`after` exists to batch a human typing: commit once they stop, not once per
+keystroke. An agent's request is already batched — the change set IS the batch
+— so holding it for another minute only delays the moment it can be undone,
+and leaves the id it was handed unusable in the meantime.
+
+A set closes when the writer says it is finished. An id minted for a single
+tool call closes when that call returns, which is exact rather than a guess: an
+id nobody else can name cannot grow afterwards. An id the CALLER supplied is
+the opposite — it exists so several calls can join one set — so it waits out
+`changeSetAfter` instead, and a request spanning several calls still commits as
+one commit and undoes as one undo.
+
 ## Undo (MCP only)
 
 An agent's request is one **change set**: however many files it wrote, committed

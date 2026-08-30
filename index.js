@@ -77,7 +77,7 @@ import { registerUndoTools } from './lib/mcp.js'
 export function git(options = {}) {
     const {
         url, paths, forge, targetBranch, writeBranch,
-        token, message, author, afterMs, maxWaitMs, pollIntervalMs,
+        token, message, author, afterMs, maxWaitMs, changeSetAfterMs, pollIntervalMs,
         owner, repo, apiBase,
     } = resolveConfig(options)
 
@@ -101,7 +101,13 @@ export function git(options = {}) {
                 // Claimed sets are drained only once their paths are actually
                 // committed. A set whose commit throws stays pending and is
                 // retried next pass rather than silently losing attribution.
-                const claimed = pendingChangeSets()
+                // Only sets that are FINISHED. An open one still inside its
+                // quiet period may still grow, and committing it now would
+                // split one request across two commits — which then takes two
+                // undos to take back.
+                const now = Date.now()
+                const claimed = pendingChangeSets().filter(set =>
+                    set.closed || (set.updatedAt ?? set.startedAt) + changeSetAfterMs <= now)
                 const consumed = []
                 const { committed } = await commitAndPushWriteBranch(folder, {
                     paths, writeBranch, message, author, token,
@@ -135,6 +141,18 @@ export function git(options = {}) {
             } catch (err) {
                 logger.error('git: sync pass failed — %s', err.stderr || err.message)
             }
+        }
+
+        // When the earliest pending change set wants to be committed, or null
+        // when none is pending. Closed sets are ready now; open ones once they
+        // have been quiet for changeSetAfterMs.
+        function soonestChangeSetDeadline(now) {
+            let soonest = null
+            for (const set of pendingChangeSets()) {
+                const at = set.closed ? now : (set.updatedAt ?? set.startedAt) + changeSetAfterMs
+                if (soonest === null || at < soonest) soonest = at
+            }
+            return soonest
         }
 
         function scheduleFire(logger) {
@@ -249,6 +267,20 @@ export function git(options = {}) {
                 return
             }
             debounceState = reduceDebounce(debounceState, { type: 'green', now }, { afterMs, maxWaitMs })
+
+            // A change set does not wait out the human-editing window.
+            //
+            // `after` exists to batch someone typing: commit once they stop,
+            // not once per keystroke. An agent's request is already batched —
+            // the set IS the batch — so holding it for another minute only
+            // delays the moment it can be undone, and made the id it was
+            // handed useless in the meantime.
+            //
+            // Closed means the writer said it was finished, so there is
+            // nothing to wait for. Open means it might still grow, so it waits
+            // out its own much shorter quiet period instead.
+            const readyAt = soonestChangeSetDeadline(now)
+            if (readyAt !== null) debounceState = { ...debounceState, fireAt: Math.min(debounceState.fireAt, readyAt) }
             scheduleFire(logger)
         })
     }
