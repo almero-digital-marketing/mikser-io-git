@@ -14,9 +14,12 @@ import path from 'node:path'
 
 import * as git from '../lib/git.js'
 import { commitAndPushWriteBranch } from '../lib/sync.js'
-import { runtime } from 'mikser-io'
+import {
+    runtime, withChangeSet, pendingChangeSets, markChangeSetsRecorded,
+    forgetAllChangeSets, useCollection,
+} from 'mikser-io'
 import { registerUndoTools } from '../lib/mcp.js'
-import { listChangeSets, findChangeSet, reversePatchFor, pathsInPatch, danglingAfterUndo } from '../lib/undo.js'
+import { listChangeSets, findChangeSet, reversePatchFor, pathsInPatch, danglingAfterUndo, previewUndo } from '../lib/undo.js'
 import { parseChangeSetLog, changeSetTrailers } from '../lib/changeset-commit.js'
 
 let folder
@@ -38,24 +41,35 @@ after(async () => { if (folder) await rm(folder, { recursive: true, force: true 
 const doc = (name) => path.join(folder, 'documents', name)
 // commitAndPushWriteBranch pushes; there is no remote here, so the push throws
 // after the commit lands. The commit is what these tests are about.
-const commit = async (changeSets) => {
+// Drives the real chain: whatever the engine has pending gets committed, and
+// the resulting sha is recorded back against the set — which is what makes it
+// resolvable by undo.
+const commit = async () => {
     try {
         await commitAndPushWriteBranch(folder, {
             paths: ['documents'], writeBranch: 'mikser',
             message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
-            changeSets, onCommitted: () => {},
+            changeSets: pendingChangeSets(),
+            onCommitted: (id, sha) => markChangeSetsRecorded([id], sha),
         })
     } catch { /* no remote */ }
 }
 
+// A write exactly as a mutating tool makes it.
+const agentWrite = (changeSet, summary, rel, content) =>
+    withChangeSet({ changeSet, summary, principal: 'agent' },
+        () => useCollection(runtime, 'documents').write(rel, content))
+
 describe('change-set commits', () => {
     it('stages only the paths its own change set wrote', async () => {
-        // The agent writes one file.
-        await writeFile(doc('agent.md'), 'agent v1\n')
+        runtime.options = { ...runtime.options, workingFolder: folder, documentsFolder: path.join(folder, 'documents') }
+        forgetAllChangeSets()
+        // The agent writes one file, as a mutating tool would.
+        await agentWrite('cs-1', 'Agent edits agent.md', 'agent.md', 'agent v1\n')
         // Before the commit fires, something else creates a document.
         await writeFile(doc('via-api.md'), 'created through the API\n')
 
-        await commit([{ id: 'cs-1', summary: 'Agent edits agent.md', paths: ['documents/agent.md'] }])
+        await commit()
 
         const log = await git.run(folder, ['log', '--format=%s'])
         assert.match(log, /Agent edits agent\.md/, 'the change set commits under its own summary')
@@ -80,16 +94,18 @@ describe('change-set commits', () => {
 })
 
 describe('undoing one change set', () => {
-    it('finds only stamped commits', async () => {
-        const sets = await listChangeSets(folder, { branch: 'mikser' })
+    it('lists the set an agent was handed, and only that', async () => {
+        const sets = await listChangeSets(folder, { limit: 10 })
         assert.deepEqual(sets.map(s => s.id), ['cs-1'],
             'the unattributed sweep is not offered as undoable')
+        assert.equal(sets[0].summary, 'Agent edits agent.md', 'the summary a person picks from survives')
+        assert.ok(sets[0].recordedAs, 'and it knows which commit carries it')
     })
 
     it('removes the change set and leaves the API document alone', async () => {
         // THE SCENARIO. Undo the agent's change; the document created through
         // the API in the same window must survive.
-        const set = await findChangeSet(folder, 'cs-1', { branch: 'mikser' })
+        const set = await findChangeSet(folder, 'cs-1')
         const patch = await reversePatchFor(folder, set)
         assert.equal(await git.patchApplies(folder, patch), true)
         await git.applyPatch(folder, patch)
@@ -212,9 +228,16 @@ describe('the sync nudge cannot kill the process', () => {
         await writeFile(path.join(own, 'documents', 'seed.md'), 'seed\n')
         await git.run(own, ['add', '-A'])
         await git.run(own, ['commit', '-m', 'seed'])
-        await writeFile(path.join(own, 'documents', 'a.md'), 'v1\n')
+        // Recorded in the engine's log and committed, the way a real write is
+        // — resolution goes through the log now, so a commit alone is not a
+        // change set.
+        runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
+        forgetAllChangeSets()
+        await withChangeSet({ changeSet: 'cs-sync', summary: 'Agent edit', principal: 'agent' },
+            () => useCollection(runtime, 'documents').write('a.md', 'v1\n'))
         await git.addPaths(own, ['documents/a.md'])
         await git.run(own, ['commit', '-m', 'Agent edit\n\nMikser-Change-Set: cs-sync'])
+        markChangeSetsRecorded(['cs-sync'], await git.revParse(own, 'HEAD'))
         return own
     }
 
@@ -255,5 +278,120 @@ describe('the sync nudge cannot kill the process', () => {
         const tools = toolsWith(() => { throw new Error('queue exploded') }, folder)
         const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
         assert.equal(r.ok, true, 'the tool still answers')
+    })
+})
+
+// The round trip an agent actually makes, and the refusals that must not all
+// collapse into "unknown".
+describe('the id an agent is handed is a handle to something', () => {
+    let own
+
+    const fixture = async () => {
+        own = await mkdtemp(path.join(tmpdir(), 'mikser-undo-rt-'))
+        await git.run(own, ['init', '-b', 'mikser'])
+        await git.run(own, ['config', 'user.email', 'test@example.com'])
+        await git.run(own, ['config', 'user.name', 'Test'])
+        await mkdir(path.join(own, 'documents'), { recursive: true })
+        await writeFile(path.join(own, 'documents', 'seed.md'), 'seed\n')
+        await git.run(own, ['add', '-A'])
+        await git.run(own, ['commit', '-m', 'seed'])
+        runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
+        forgetAllChangeSets()
+        return own
+    }
+    const sync = async (folder) => {
+        try {
+            await commitAndPushWriteBranch(folder, {
+                paths: ['documents'], writeBranch: 'mikser',
+                message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
+                changeSets: pendingChangeSets(),
+                onCommitted: (id, sha) => markChangeSetsRecorded([id], sha),
+            })
+        } catch { /* no remote */ }
+    }
+    after(async () => { if (own) await rm(own, { recursive: true, force: true }) })
+
+    it('lists a write immediately, before anything has committed it', async () => {
+        // The reported bug: the id came back and resolved to nothing.
+        const folder = await fixture()
+        await withChangeSet({ changeSet: 'cs-live', summary: 'Restyle the product card', principal: 'agent' },
+            () => useCollection(runtime, 'documents').write('card.liquid', 'v2\n'))
+
+        const listed = await listChangeSets(folder, { limit: 5 })
+        assert.deepEqual(listed.map(s => s.id), ['cs-live'], 'the id must resolve the moment it is handed out')
+        assert.equal(listed[0].summary, 'Restyle the product card')
+    })
+
+    it('says "not yet committed" rather than "unknown" before the sync pass', async () => {
+        // Two different problems. An agent told "unknown" goes looking for a
+        // typo in an id that is perfectly valid.
+        const preview = await previewUndo(own, { id: 'cs-live', branch: 'mikser', runtime })
+        assert.equal(preview.ok, false)
+        assert.equal(preview.refused, 'not-yet-committed')
+        assert.match(preview.error, /nothing to revert from/)
+    })
+
+    it('becomes undoable once the sync pass commits it', async () => {
+        await sync(own)
+        const preview = await previewUndo(own, { id: 'cs-live', branch: 'mikser', runtime })
+        assert.equal(preview.ok, true)
+        assert.deepEqual(preview.touched, ['documents/card.liquid'])
+        assert.ok(preview.set.commit, 'and it names the commit it would revert')
+    })
+
+    it('groups writes sharing an explicit id into ONE entry covering both files', async () => {
+        const folder = await fixture()
+        await withChangeSet({ changeSet: 'cs-two', summary: 'Rename the section', principal: 'agent' }, async () => {
+            await useCollection(runtime, 'documents').write('a.md', 'A\n')
+            await useCollection(runtime, 'documents').write('b.md', 'B\n')
+        })
+        const [entry] = await listChangeSets(folder, { limit: 5 })
+        assert.equal(entry.id, 'cs-two')
+        assert.deepEqual(entry.paths.sort(), ['documents/a.md', 'documents/b.md'],
+            'one entry, both files — that is the whole point of passing the id')
+
+        await sync(folder)
+        const preview = await previewUndo(folder, { id: 'cs-two', branch: 'mikser', runtime })
+        assert.deepEqual(preview.touched.sort(), ['documents/a.md', 'documents/b.md'],
+            'and undoing it takes back both')
+    })
+
+    it('refuses as conflict when the file changed again since', async () => {
+        const folder = await fixture()
+        await withChangeSet({ changeSet: 'cs-conf', summary: 'First edit', principal: 'agent' },
+            () => useCollection(runtime, 'documents').write('c.md', 'first\n'))
+        await sync(folder)
+        // Someone edits the same file afterwards and it is committed.
+        await writeFile(path.join(folder, 'documents', 'c.md'), 'someone else, later\n')
+        await git.addPaths(folder, ['documents/c.md'])
+        await git.run(folder, ['commit', '-m', 'later edit'])
+
+        const preview = await previewUndo(folder, { id: 'cs-conf', branch: 'mikser', runtime })
+        assert.equal(preview.applies, false)
+        assert.match(preview.conflict, /cannot be applied automatically/)
+    })
+
+    it('says "not on this branch" when the commit was left behind', async () => {
+        const folder = await fixture()
+        // Captured before the write, so the branch is rooted where the commit
+        // demonstrably is not — rather than at a relative offset whose depth
+        // depends on how many commits the sync happened to make.
+        const base = await git.revParse(folder, 'HEAD')
+        await withChangeSet({ changeSet: 'cs-branch', summary: 'On a branch', principal: 'agent' },
+            () => useCollection(runtime, 'documents').write('d.md', 'D\n'))
+        await sync(folder)
+        // A branch that never had the commit — what a switch or a replaced
+        // history leaves an agent looking at.
+        await git.run(folder, ['checkout', '-q', '-b', 'elsewhere', base])
+
+        const preview = await previewUndo(folder, { id: 'cs-branch', branch: 'elsewhere', runtime })
+        assert.equal(preview.refused, 'not-on-this-branch')
+        assert.match(preview.error, /not reachable/)
+        await git.run(folder, ['checkout', '-q', 'mikser'])
+    })
+
+    it('says "unknown" only for an id that really is not there', async () => {
+        const preview = await previewUndo(own, { id: 'cs-never-existed', branch: 'mikser', runtime })
+        assert.equal(preview.refused, 'unknown-change-set')
     })
 })

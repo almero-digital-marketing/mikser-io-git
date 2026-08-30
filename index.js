@@ -71,7 +71,7 @@ function withGuard(logger, what, fn) {
 }
 
 
-import { pendingChangeSets, clearChangeSets } from 'mikser-io'
+import { pendingChangeSets, markChangeSetsRecorded } from 'mikser-io'
 import { registerUndoTools } from './lib/mcp.js'
 
 export function git(options = {}) {
@@ -106,9 +106,9 @@ export function git(options = {}) {
                 const { committed } = await commitAndPushWriteBranch(folder, {
                     paths, writeBranch, message, author, token,
                     changeSets: claimed,
-                    onCommitted: (id) => consumed.push(id),
+                    onCommitted: (id, sha) => consumed.push({ id, sha }),
                 })
-                clearChangeSets(consumed)
+                for (const { id, sha } of consumed) markChangeSetsRecorded([id], sha)
                 if (!committed) return
                 logger.info('git: committed + pushed to %s', writeBranch)
 
