@@ -117,9 +117,16 @@ export function git(options = {}) {
                 const consumed = []
                 const failed = []
                 const settled = []
+                // What a not-yet-ready set has written. Held back from the
+                // sweep so the set can still commit it under its own name.
+                const claimedIds = new Set(claimed.map(set => set.id))
+                const reserved = pendingChangeSets()
+                    .filter(set => !claimedIds.has(set.id))
+                    .flatMap(set => set.paths)
+
                 const { committed } = await commitAndPushWriteBranch(folder, {
                     paths, writeBranch, message, author, token,
-                    changeSets: claimed,
+                    changeSets: claimed, reserved,
                     onCommitted: (id, sha) => consumed.push({ id, sha }),
                     // Finished with nothing to write. Drained rather than
                     // retried: the diff is empty and will stay empty, so a

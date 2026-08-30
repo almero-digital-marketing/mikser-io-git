@@ -7,14 +7,14 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
     runtime, withChangeSet, pendingChangeSets, listChangeSets,
     markChangeSetsRecorded, markChangeSetFailed, markChangeSetSettled, forgetAllChangeSets,
-    useCollection, recordChangeSetWrite,
+    useCollection, recordChangeSetWrite, closeChangeSet,
 } from 'mikser-io'
 import * as git from '../lib/git.js'
 import { commitAndPushWriteBranch } from '../lib/sync.js'
@@ -188,5 +188,63 @@ describe('a set with no net diff', () => {
         const { settled } = await pass()
         assert.ok(settled.includes('cs-elsewhere'))
         assert.deepEqual(pendingChangeSets().map(s => s.id), [])
+    })
+})
+
+// The sweep must not take work an open change set still owns.
+//
+// Observed on lmed: an undo deleted a file that a previous commit had added —
+// a real deletion diff — and its change set still settled as `empty`. The
+// deletion was in git, under the unattributed sweep commit. A pass had fired
+// while the undo's set was still inside its quiet window, so the set was not
+// claimed, the sweep took its work, and by the time the set was ready there
+// was nothing left to commit. Its changes are in git under a commit that does
+// not name it, so it can never be undone.
+describe('an open change set keeps its own work', () => {
+    const passReserving = async () => {
+        const out = { committed: [], settled: [] }
+        const claimed = pendingChangeSets().filter(s => s.closed)
+        const claimedIds = new Set(claimed.map(s => s.id))
+        const reserved = pendingChangeSets().filter(s => !claimedIds.has(s.id)).flatMap(s => s.paths)
+        try {
+            await commitAndPushWriteBranch(folder, {
+                paths: ['documents'], writeBranch: 'mikser',
+                message: ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
+                changeSets: claimed, reserved,
+                onCommitted: (id, sha) => { out.committed.push(id); markChangeSetsRecorded([id], sha) },
+                onFailed: () => {},
+                onSettled: (id, r) => { out.settled.push(id); markChangeSetSettled(id, r) },
+            })
+        } catch { /* no remote */ }
+        return out
+    }
+
+    it('leaves a deletion for the set that made it, not the sweep', async () => {
+        await write('cs-added', 'Add it', 'owned.md', 'body\n')
+        await passReserving()
+        assert.ok(await stat(path.join(folder, 'documents', 'owned.md')).catch(() => null))
+
+        // An undo removes it, recorded as a set that has not closed yet.
+        await rm(path.join(folder, 'documents', 'owned.md'))
+        recordChangeSetWrite({
+            changeSet: 'cs-undo', summary: 'Undo: Add it', undoOf: 'cs-added',
+            uri: path.join(folder, 'documents', 'owned.md'), operation: 'delete',
+        })
+
+        // A pass fires while it is still open — the case that lost the work.
+        const early = await passReserving()
+        assert.ok(!early.committed.includes('cs-undo'), 'not claimed yet, correctly')
+        const head = await git.run(folder, ['log', '-1', '--format=%s'])
+        assert.doesNotMatch(head, /content: \d+ file/,
+            'and the sweep must not commit it as unattributed')
+
+        // Once it closes, it commits its own deletion under its own name.
+        closeChangeSet('cs-undo')
+        const later = await passReserving()
+        assert.ok(later.committed.includes('cs-undo'))
+        assert.ok(!later.settled.includes('cs-undo'), 'a real deletion is not an empty set')
+        assert.match(await git.run(folder, ['log', '-1', '--format=%s']), /Undo: Add it/)
+        assert.equal(await git.run(folder, ['ls-files', 'documents/owned.md']), '',
+            'and the file really is gone from git')
     })
 })
