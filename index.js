@@ -71,7 +71,7 @@ function withGuard(logger, what, fn) {
 }
 
 
-import { pendingChangeSets, markChangeSetsRecorded, markChangeSetFailed } from 'mikser-io'
+import { pendingChangeSets, markChangeSetsRecorded, markChangeSetFailed, markChangeSetSettled } from 'mikser-io'
 import { registerUndoTools } from './lib/mcp.js'
 
 export function git(options = {}) {
@@ -116,10 +116,19 @@ export function git(options = {}) {
                     || set.startedAt + maxWaitMs <= now)
                 const consumed = []
                 const failed = []
+                const settled = []
                 const { committed } = await commitAndPushWriteBranch(folder, {
                     paths, writeBranch, message, author, token,
                     changeSets: claimed,
                     onCommitted: (id, sha) => consumed.push({ id, sha }),
+                    // Finished with nothing to write. Drained rather than
+                    // retried: the diff is empty and will stay empty, so a
+                    // retry costs a pass and leaves a null that looks like a
+                    // fault.
+                    onSettled: (id, reason) => {
+                        settled.push(id)
+                        markChangeSetSettled(id, reason)
+                    },
                     onFailed: (id, err) => {
                         failed.push(id)
                         markChangeSetFailed(id, err)
@@ -130,9 +139,12 @@ export function git(options = {}) {
                 for (const { id, sha } of consumed) markChangeSetsRecorded([id], sha)
                 // Said every pass, so a stall is visible in the log instead of
                 // inferred from a column of nulls.
-                if (claimed.length || failed.length) {
-                    logger.info('git: sync pass — %d change set(s), %d committed, %d failed',
-                        claimed.length, consumed.length, failed.length)
+                if (claimed.length) {
+                    // Settled is reported too, or a pass that correctly had
+                    // nothing to write logs "0 committed, 0 failed" — true,
+                    // and indistinguishable from a scheduler that never ran.
+                    logger.info('git: sync pass — %d change set(s), %d committed, %d settled, %d failed',
+                        claimed.length, consumed.length, settled.length, failed.length)
                 }
                 if (!committed) return
                 logger.info('git: committed + pushed to %s', writeBranch)

@@ -13,7 +13,8 @@ import path from 'node:path'
 
 import {
     runtime, withChangeSet, pendingChangeSets, listChangeSets,
-    markChangeSetsRecorded, markChangeSetFailed, forgetAllChangeSets, useCollection,
+    markChangeSetsRecorded, markChangeSetFailed, markChangeSetSettled, forgetAllChangeSets,
+    useCollection, recordChangeSetWrite,
 } from 'mikser-io'
 import * as git from '../lib/git.js'
 import { commitAndPushWriteBranch } from '../lib/sync.js'
@@ -39,7 +40,7 @@ const write = (id, summary, rel, content) =>
         () => useCollection(runtime, 'documents').write(rel, content))
 
 const pass = async () => {
-    const committed = [], failed = []
+    const committed = [], failed = [], settled = []
     try {
         await commitAndPushWriteBranch(folder, {
             paths: ['documents'], writeBranch: 'mikser',
@@ -47,9 +48,10 @@ const pass = async () => {
             changeSets: pendingChangeSets(),
             onCommitted: (id, sha) => { committed.push(id); markChangeSetsRecorded([id], sha) },
             onFailed: (id, err) => { failed.push(id); markChangeSetFailed(id, err) },
+            onSettled: (id, reason) => { settled.push(id); markChangeSetSettled(id, reason) },
         })
     } catch { /* no remote to push to */ }
-    return { committed, failed }
+    return { committed, failed, settled }
 }
 
 describe('every pending change set reaches a commit', () => {
@@ -127,5 +129,64 @@ describe('bounded operations', () => {
         // command that never returns blocks all later passes and the inbound
         // poll — permanently, with no error anywhere.
         assert.ok(git.GIT_TIMEOUT_MS > 0, 'a git command must not be able to run forever')
+    })
+})
+
+// A change set whose changes cancel out.
+//
+// Observed on lmed: five sets at committed: null indefinitely, every pass
+// logging "5 change set(s), 0 committed, 0 failed" — literally true and
+// indistinguishable from a scheduler that never ran. Their disk effects
+// cancelled: an undo of a create, and probes that added then removed their own
+// files. git correctly made no commit, so neither callback fired, nothing
+// drained them, and they were re-claimed forever.
+describe('a set with no net diff', () => {
+    it('drains instead of being re-claimed every pass', async () => {
+        // A TRACKED file changed and then changed back — the shape the live
+        // instance hit, where an undo restored what a commit had added. git
+        // stages nothing and makes no commit, with no error: the case that had
+        // no exit.
+        await write('cs-seed', 'Add it', 'settles.md', 'original\n')
+        await pass()
+        await write('cs-empty', 'Change it and change it back', 'settles.md', 'edited\n')
+        await writeFile(path.join(folder, 'documents', 'settles.md'), 'original\n')
+
+        const first = await pass()
+        assert.deepEqual(first.committed, [], 'git makes no commit, correctly')
+        assert.deepEqual(first.failed, [], 'and it is not a failure')
+        assert.ok(first.settled.includes('cs-empty'), 'so it needs the third outcome')
+
+        // The bug: still claimed on the next pass, and every pass after.
+        assert.deepEqual(pendingChangeSets().map(s => s.id), [],
+            'a drained set must not come back')
+
+        // Asserted here, not in a following test: the log is cleared between
+        // tests, so a second test would read an empty log and pass for the
+        // wrong reason.
+        const set = listChangeSets({ limit: 20 }).find(s => s.id === 'cs-empty')
+        assert.equal(set.recordedAs, null, 'there is genuinely no commit')
+        assert.equal(set.outcome, 'empty', 'and the null is explained rather than a mystery')
+    })
+
+    it('does not block the sets around it', async () => {
+        await write('cs-before', 'Real work', 'before.md', 'a\n')
+        await write('cs-void', 'Cancels out', 'void.md', 'b\n')
+        await rm(path.join(folder, 'documents', 'void.md'))
+        await write('cs-after', 'More real work', 'after.md', 'c\n')
+
+        const { committed, settled } = await pass()
+        assert.ok(committed.includes('cs-before'))
+        assert.ok(committed.includes('cs-after'))
+        assert.ok(settled.includes('cs-void'))
+        assert.deepEqual(pendingChangeSets().map(s => s.id), [], 'the pass drains completely')
+    })
+
+    it('drains a set that wrote outside the paths this instance versions', async () => {
+        // Another instance may own those folders; this one is finished with
+        // it either way, and holding it forever helps nobody.
+        recordChangeSetWrite({ changeSet: 'cs-elsewhere', summary: 'Outside', uri: path.join(folder, 'not-versioned', 'x.md') })
+        const { settled } = await pass()
+        assert.ok(settled.includes('cs-elsewhere'))
+        assert.deepEqual(pendingChangeSets().map(s => s.id), [])
     })
 })
