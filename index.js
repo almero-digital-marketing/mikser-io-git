@@ -181,6 +181,11 @@ export function git(options = {}) {
                 registerUndoTools(runtime.options.mcp, {
                     folder, writeBranch, runtime, useLogger,
                     isInert: () => inert,
+                    // How long a write waits before it is committed. Reported
+                    // in the refusal, because "not committed yet" without a
+                    // duration reads as broken rather than as pending — and
+                    // the default is a full minute of quiet.
+                    afterMs, maxWaitMs,
                     // Guarded, because the tool fires this without awaiting
                     // it. An unhandled rejection has ended the process since
                     // Node 15, and mikser installs no handler — the same

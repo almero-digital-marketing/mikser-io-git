@@ -395,3 +395,47 @@ describe('the id an agent is handed is a handle to something', () => {
         assert.equal(preview.refused, 'unknown-change-set')
     })
 })
+
+// The window an agent always lands in.
+//
+// Writes are committed after a quiet period — 60s by default — so an agent
+// that writes and immediately asks to undo is inside it every time. The
+// refusal has to say how long, or "not committed yet" reads as "never" and
+// the whole feature looks broken.
+describe('a pending change set says when it will be committable', () => {
+    it('reports the commit window rather than a bare refusal', async () => {
+        const own = await mkdtemp(path.join(tmpdir(), 'mikser-undo-win-'))
+        try {
+            await git.run(own, ['init', '-b', 'mikser'])
+            await git.run(own, ['config', 'user.email', 't@e.com'])
+            await git.run(own, ['config', 'user.name', 'T'])
+            await mkdir(path.join(own, 'documents'), { recursive: true })
+            await writeFile(path.join(own, 'documents', 'seed.md'), 'seed\n')
+            await git.run(own, ['add', '-A'])
+            await git.run(own, ['commit', '-m', 'seed'])
+
+            runtime.options = { ...runtime.options, workingFolder: own, documentsFolder: path.join(own, 'documents') }
+            forgetAllChangeSets()
+            await withChangeSet({ changeSet: 'cs-pending', summary: 'Just written', principal: 'agent' },
+                () => useCollection(runtime, 'documents').write('p.md', 'x\n'))
+
+            const tools = new Map()
+            registerUndoTools({ simpleTool: (n, _d, _s, h) => tools.set(n, h) }, {
+                folder: own, writeBranch: 'mikser', runtime,
+                useLogger: () => ({ error: () => {} }), isInert: () => false,
+                afterMs: 60_000, maxWaitMs: 600_000, sync: () => {},
+            })
+
+            const listed = JSON.parse((await tools.get('mikser_changes')({ limit: 5 })).content[0].text)
+            assert.equal(listed.changes[0].id, 'cs-pending', 'listed the moment it is written')
+            assert.equal(listed.changes[0].committed, null, 'and says undo is not available yet')
+
+            const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-pending', dryRun: true })).content[0].text)
+            assert.equal(r.refused, 'not-yet-committed')
+            assert.match(r.commitsAfter, /60s of quiet/, 'the agent must learn it is pending, not broken')
+            assert.match(r.next, /safe on disk/)
+        } finally {
+            await rm(own, { recursive: true, force: true })
+        }
+    })
+})
