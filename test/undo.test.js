@@ -15,6 +15,7 @@ import path from 'node:path'
 import * as git from '../lib/git.js'
 import { commitAndPushWriteBranch } from '../lib/sync.js'
 import { runtime } from 'mikser-io'
+import { registerUndoTools } from '../lib/mcp.js'
 import { listChangeSets, findChangeSet, reversePatchFor, pathsInPatch, danglingAfterUndo } from '../lib/undo.js'
 import { parseChangeSetLog, changeSetTrailers } from '../lib/changeset-commit.js'
 
@@ -187,5 +188,72 @@ describe('undo that would leave references dangling', () => {
     it('says nothing when the undo removes nothing', async () => {
         withCatalog([], {})
         assert.deepEqual(await danglingAfterUndo({ runtime, deletedPaths: [], setPaths: ['a.md'] }), [])
+    })
+})
+
+// A sync that rejects must not end the process.
+//
+// The tool fires it without awaiting — a network push is not something a tool
+// call should block on — and Node has ended the process on an unhandled
+// rejection since v15. mikser installs no handler, so a floating promise here
+// is fatal rather than noisy.
+describe('the sync nudge cannot kill the process', () => {
+    let own
+
+    // Its own repo with a fresh, still-applicable change set. Reusing the
+    // shared fixture would reach `refused: conflict` before the nudge and pass
+    // without ever running the code under test.
+    const fixture = async () => {
+        own = await mkdtemp(path.join(tmpdir(), 'mikser-undo-sync-'))
+        await git.run(own, ['init', '-b', 'mikser'])
+        await git.run(own, ['config', 'user.email', 'test@example.com'])
+        await git.run(own, ['config', 'user.name', 'Test'])
+        await mkdir(path.join(own, 'documents'), { recursive: true })
+        await writeFile(path.join(own, 'documents', 'seed.md'), 'seed\n')
+        await git.run(own, ['add', '-A'])
+        await git.run(own, ['commit', '-m', 'seed'])
+        await writeFile(path.join(own, 'documents', 'a.md'), 'v1\n')
+        await git.addPaths(own, ['documents/a.md'])
+        await git.run(own, ['commit', '-m', 'Agent edit\n\nMikser-Change-Set: cs-sync'])
+        return own
+    }
+
+    const toolsWith = (sync, folder) => {
+        const tools = new Map()
+        registerUndoTools({ simpleTool: (n, _d, _s, h) => tools.set(n, h) }, {
+            folder, writeBranch: 'mikser', runtime,
+            useLogger: () => ({ error: () => {} }),
+            isInert: () => false,
+            sync,
+        })
+        return tools
+    }
+
+    after(async () => { if (own) await rm(own, { recursive: true, force: true }) })
+
+    it('survives a sync that rejects', async () => {
+        const folder = await fixture()
+        runtime.options = { ...runtime.options, workingFolder: folder }
+        const tools = toolsWith(() => Promise.reject(new Error('remote unreachable')), folder)
+
+        let unhandled = null
+        const onUnhandled = (err) => { unhandled = err }
+        process.on('unhandledRejection', onUnhandled)
+        try {
+            const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
+            assert.equal(r.ok, true, 'the undo must actually reach the nudge, or this test proves nothing')
+            for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+        } finally {
+            process.off('unhandledRejection', onUnhandled)
+        }
+        assert.equal(unhandled, null, 'a rejected sync must not surface as an unhandled rejection')
+    })
+
+    it('survives a sync that throws synchronously', async () => {
+        const folder = await fixture()
+        runtime.options = { ...runtime.options, workingFolder: folder }
+        const tools = toolsWith(() => { throw new Error('queue exploded') }, folder)
+        const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
+        assert.equal(r.ok, true, 'the tool still answers')
     })
 })

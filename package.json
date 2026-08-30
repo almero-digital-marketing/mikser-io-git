@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-git",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Two-way git sync for mikser-io. The working folder itself is the checkout, on a dedicated `mikser` branch (durable write log for API/MCP/agent edits). `paths` (optional) scopes auto-commits to specific collection folders (documents, layouts, files, ...) as a hard pathspec; omit it and the whole working folder is committed, subject to .gitignore. Every green cycle commits + pushes whatever's in scope and attempts to merge into the target branch (`main`) via a pull request; a red cycle (any render/postprocess failure) holds the merge and leaves the PR open for a human to resolve. Inbound changes on the target branch merge back into the working copy via poll. Forge-portable: GitHub and Gitea adapters, plus a no-forge fast-forward-only floor for any bare remote.",
   "main": "index.js",
   "files": [
