@@ -250,7 +250,16 @@ The guarantee this plugin actually gives you is narrower and more honest than "o
 
 ## Promotion mechanics
 
-**GitHub / Gitea**: one open pull request from `writeBranch` into `branch`, reused across cycles (never spammed) — the plugin looks for an existing open PR with the right head/base before creating a new one. On a green cycle it attempts to merge that PR. Success: the write branch is fast-forwarded (well, hard-reset) onto the new target tip and re-pushed, so it never drifts arbitrarily far from `main` between promotions. Failure (conflict, or anything else): the PR stays open, nothing is discarded, and a warning names the reason and links the PR — re-logged at most every 30 minutes so a long-stuck conflict doesn't spam your logs on every debounce fire.
+**GitHub / Gitea**: one open pull request from `writeBranch` into `branch`, reused across cycles (never spammed) — the plugin looks for an existing open PR with the right head/base before creating a new one. On a green cycle it asks the forge whether the PR is mergeable, then merges it. Success: the write branch is fast-forwarded (well, hard-reset) onto the new target tip and re-pushed, so it never drifts arbitrarily far from `main` between promotions.
+
+Failure is split in two, because the forge means two different things by it:
+
+- **A human has to look** — a conflict, a protected branch, a required review. The PR stays open, nothing is discarded, and a warning names the reason and links the PR, re-logged at most every 30 minutes.
+- **Not ready yet** — the forge has not finished computing mergeability (`mergeable: null`, Gitea's *"Please try again later"*), or the head moved under the merge. That is a retry signal, not a verdict, and it is answered by retrying rather than by giving up.
+
+**The retry runs on the inbound poll, not on the next commit.** The condition is "the write branch is ahead of the target", which stays true after the editor has finished editing — coupling it to "we just committed" meant a transient failure was terminal in practice, because the retry needed an edit that was never coming. An outstanding promote lands on its own within one poll interval.
+
+**A write branch that stays ahead is an error, not a warning.** Past a few minutes this is a broken pipeline rather than a slow one, and it is the one condition where the site and the repository disagree about what the site is: the container that took the edit serves it from its working folder, while a rebuild from the target branch comes up without it and the next push to the target reverts it — as a valid commit, on a green build. It is logged at error level with the code `git-promote-stuck`, naming both refs, so it surfaces as a fault in `--json` and `mikser_ping` rather than only in a log.
 
 **`forge: 'none'`**: `git push mikser:main`, fast-forward only. No PR, no API. If it's rejected (main has diverged), the same holding behavior applies — everything queues on `mikser`, logged, until you merge by hand or switch on a forge adapter.
 

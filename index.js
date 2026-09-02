@@ -50,12 +50,20 @@
 
 import { resolveConfig } from './lib/config.js'
 import { gatherFolderState, decideBootstrap, performClone, performVerify } from './lib/bootstrap.js'
-import { commitAndPushWriteBranch, promote } from './lib/sync.js'
+import { commitAndPushWriteBranch, promote, promotePending, promoteEscalation } from './lib/sync.js'
 import { pullInbound } from './lib/inbound.js'
 import { reduceDebounce, IDLE_DEBOUNCE_STATE } from './lib/debounce.js'
 import { createGitQueue } from './lib/queue.js'
 
 const REANNOUNCE_MS = 30 * 60 * 1000   // re-log a still-open conflict at most every 30 min
+// How long the write branch may sit ahead of the target before it stops being
+// a slow pipeline and becomes a broken one. The site serves the edit from the
+// working folder while the branch that defines what is deployed does not carry
+// it — so a rebuild from the target comes up without it, and the next push to
+// the target reverts it, as a valid commit on a green build. That is the one
+// condition where the site and the repository disagree about what the site is,
+// and it earns an error rather than a rate-limited warning.
+const AHEAD_STUCK_MS = 5 * 60 * 1000
 
 // Run a timer body so that nothing it does can end the process.
 //
@@ -94,6 +102,10 @@ export function git(options = {}) {
         let watchdog = null
         let lastPromoteFailureReason = null
         let lastPromoteFailureLoggedAt = 0
+        // When the write branch was first seen ahead of the target and not
+        // promoted. Cleared on every successful promote.
+        let aheadSince = null
+        let aheadReported = false
         let inert = false   // set true on a bootstrap refusal; the plugin stops touching the folder for the rest of this process
 
         async function runSyncPass(logger) {
@@ -164,25 +176,90 @@ export function git(options = {}) {
                     forge, targetBranch, writeBranch, token, owner, repo, apiBase,
                     prTitle: `Promote ${writeBranch} → ${targetBranch}`,
                 })
-                if (result.promoted) {
-                    logger.info('git: promoted %s → %s', writeBranch, targetBranch)
-                    lastPromoteFailureReason = null
-                    return
-                }
-                const changed = result.reason !== lastPromoteFailureReason
-                const dueToReannounce = Date.now() - lastPromoteFailureLoggedAt > REANNOUNCE_MS
-                if (changed || dueToReannounce) {
-                    logger.warn(
-                        'git: could not promote %s → %s — %s%s',
-                        writeBranch, targetBranch, result.reason,
-                        result.prUrl ? ` (${result.prUrl})` : '',
-                    )
-                    lastPromoteFailureReason = result.reason
-                    lastPromoteFailureLoggedAt = Date.now()
-                }
+                reportPromote(logger, result)
             } catch (err) {
                 logger.error('git: sync pass failed — %s', err.stderr || err.message)
             }
+        }
+
+        // One place both callers report through, so the sync pass and the poll
+        // cannot drift into saying different things about the same condition.
+        function reportPromote(logger, result) {
+            if (result.promoted) {
+                logger.info('git: promoted %s → %s', writeBranch, targetBranch)
+                lastPromoteFailureReason = null
+                aheadSince = null
+                aheadReported = false
+                return
+            }
+
+            aheadSince ??= Date.now()
+
+            // A transient failure is the forge saying "ask again", and the
+            // poll will. Saying so every 30 seconds would train the reader to
+            // ignore the channel, which is how the real one gets missed — so
+            // it stays quiet until it has actually been failing for a while,
+            // and then it is not transient any more.
+            const stuckFor = Date.now() - aheadSince
+            const level = promoteEscalation({
+                transient: result.transient, aheadSince, stuckAfterMs: AHEAD_STUCK_MS,
+            })
+
+            if (level === 'quiet') {
+                logger.debug(
+                    'git: promote %s → %s not ready yet — %s (retrying on the poll)',
+                    writeBranch, targetBranch, result.reason)
+                return
+            }
+
+            if (level === 'error' && !aheadReported) {
+                // Coded, so it registers as a FAULT: a subsystem declaring it
+                // cannot do its job, deduped and surfaced in --json and
+                // mikser_ping rather than only in a log nobody is reading.
+                logger.error(
+                    { code: 'git-promote-stuck', writeBranch, targetBranch, prUrl: result.prUrl ?? null },
+                    'git: %s has been ahead of %s for %d minute(s) and is not promoting — %s%s. '
+                    + 'The site is serving edits this repository does not carry: a rebuild from %s comes up '
+                    + 'without them, and the next push to %s reverts them.',
+                    writeBranch, targetBranch, Math.round(stuckFor / 60000), result.reason,
+                    result.prUrl ? ` (${result.prUrl})` : '', targetBranch, targetBranch)
+                aheadReported = true
+                lastPromoteFailureReason = result.reason
+                lastPromoteFailureLoggedAt = Date.now()
+                return
+            }
+
+            const changed = result.reason !== lastPromoteFailureReason
+            const dueToReannounce = Date.now() - lastPromoteFailureLoggedAt > REANNOUNCE_MS
+            if (changed || dueToReannounce) {
+                logger.warn(
+                    'git: could not promote %s → %s — %s%s',
+                    writeBranch, targetBranch, result.reason,
+                    result.prUrl ? ` (${result.prUrl})` : '',
+                )
+                lastPromoteFailureReason = result.reason
+                lastPromoteFailureLoggedAt = Date.now()
+            }
+        }
+
+        // Retry an outstanding promote, on the poll rather than on a commit.
+        //
+        // The condition is "the write branch is ahead of the target", which
+        // survives the editor going home. Coupling it to "we just committed"
+        // meant a transient failure was terminal in practice, because the
+        // retry needed an edit that was never coming.
+        async function retryPromote(logger) {
+            const result = await promotePending(folder, {
+                forge, targetBranch, writeBranch, token, owner, repo, apiBase,
+                prTitle: `Promote ${writeBranch} → ${targetBranch}`,
+            })
+            if (!result) {
+                // Nothing outstanding — the target contains everything.
+                aheadSince = null
+                aheadReported = false
+                return
+            }
+            reportPromote(logger, result)
         }
 
         // When the earliest pending change set wants to be committed, or null
@@ -306,8 +383,13 @@ export function git(options = {}) {
                     // v15, and mikser installs no handler. Anything reaching
                     // here is a bug worth logging, not worth killing the
                     // build server for.
-                    withGuard(logger, 'inbound poll', () => enqueueGit(() =>
-                        pullInbound(folder, { writeBranch, targetBranch, token, logger })))
+                    withGuard(logger, 'inbound poll', () => enqueueGit(async () => {
+                        await pullInbound(folder, { writeBranch, targetBranch, token, logger })
+                        // Same tick, same queue slot: whatever the pull just
+                        // learned about the remote is what the promote should
+                        // act on.
+                        await retryPromote(logger)
+                    }))
                 }, pollIntervalMs)
                 pollTimer.unref?.()
             }
