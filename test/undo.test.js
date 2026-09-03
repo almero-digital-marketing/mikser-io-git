@@ -19,6 +19,7 @@ import {
     forgetAllChangeSets, useCollection,
 } from 'mikser-io'
 import { registerUndoTools } from '../lib/mcp.js'
+import { invokeTool } from 'mikser-io'
 import { listChangeSets, findChangeSet, reversePatchFor, pathsInPatch, danglingAfterUndo, previewUndo } from '../lib/undo.js'
 import { parseChangeSetLog, changeSetTrailers } from '../lib/changeset-commit.js'
 
@@ -241,15 +242,15 @@ describe('the sync nudge cannot kill the process', async () => {
         return own
     }
 
+    // Registers against the engine registry; the tools are then reached by
+    // name through invokeTool, on the surface they declare.
     const toolsWith = (sync, folder) => {
-        const tools = new Map()
-        registerUndoTools({ simpleTool: (n, _d, _s, h) => tools.set(n, h) }, {
+        registerUndoTools({
             folder, writeBranch: 'mikser', runtime,
             useLogger: () => ({ error: () => {} }),
             isInert: () => false,
             sync,
         })
-        return tools
     }
 
     after(async () => { if (own) await rm(own, { recursive: true, force: true }) })
@@ -257,13 +258,13 @@ describe('the sync nudge cannot kill the process', async () => {
     it('survives a sync that rejects', async () => {
         const folder = await fixture()
         runtime.options = { ...runtime.options, workingFolder: folder }
-        const tools = toolsWith(() => Promise.reject(new Error('remote unreachable')), folder)
+        toolsWith(() => Promise.reject(new Error('remote unreachable')), folder)
 
         let unhandled = null
         const onUnhandled = (err) => { unhandled = err }
         process.on('unhandledRejection', onUnhandled)
         try {
-            const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
+            const r = JSON.parse((await invokeTool('undo', { id: 'cs-sync', dryRun: false })).content[0].text)
             assert.equal(r.ok, true, 'the undo must actually reach the nudge, or this test proves nothing')
             for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
         } finally {
@@ -275,8 +276,8 @@ describe('the sync nudge cannot kill the process', async () => {
     it('survives a sync that throws synchronously', async () => {
         const folder = await fixture()
         runtime.options = { ...runtime.options, workingFolder: folder }
-        const tools = toolsWith(async () => { throw new Error('queue exploded') }, folder)
-        const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-sync', dryRun: false })).content[0].text)
+        toolsWith(async () => { throw new Error('queue exploded') }, folder)
+        const r = JSON.parse((await invokeTool('undo', { id: 'cs-sync', dryRun: false })).content[0].text)
         assert.equal(r.ok, true, 'the tool still answers')
     })
 })
@@ -419,18 +420,17 @@ describe('a pending change set says when it will be committable', async () => {
             await withChangeSet({ changeSet: 'cs-pending', summary: 'Just written', principal: 'agent' },
                 () => useCollection(runtime, 'documents').write('p.md', 'x\n'))
 
-            const tools = new Map()
-            registerUndoTools({ simpleTool: (n, _d, _s, h) => tools.set(n, h) }, {
+                        registerUndoTools({
                 folder: own, writeBranch: 'mikser', runtime,
                 useLogger: () => ({ error: () => {} }), isInert: () => false,
                 afterMs: 60_000, maxWaitMs: 600_000, sync: () => {},
             })
 
-            const listed = JSON.parse((await tools.get('mikser_changes')({ limit: 5 })).content[0].text)
+            const listed = JSON.parse((await invokeTool('changes', { limit: 5 })).content[0].text)
             assert.equal(listed.changes[0].id, 'cs-pending', 'listed the moment it is written')
             assert.equal(listed.changes[0].committed, null, 'and says undo is not available yet')
 
-            const r = JSON.parse((await tools.get('mikser_undo')({ id: 'cs-pending', dryRun: true })).content[0].text)
+            const r = JSON.parse((await invokeTool('undo', { id: 'cs-pending', dryRun: true })).content[0].text)
             assert.equal(r.refused, 'not-yet-committed')
             assert.match(r.commitsAfter, /60s of quiet/, 'the agent must learn it is pending, not broken')
             assert.match(r.next, /safe on disk/)
