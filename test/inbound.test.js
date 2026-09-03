@@ -56,6 +56,49 @@ describe('pullInbound against real repositories', async () => {
         return { upstream, local }
     }
 
+    it('pushes commits an earlier failure left behind', async () => {
+        // The real sequence, from lmed: the token expired, pushes failed, and
+        // because pushWriteBranch only runs from the COMMIT path nothing ever
+        // looked at those commits again. 113 of them sat on one container with
+        // no copy anywhere else, while the site served fine and the tree was
+        // clean. Recovery has to be automatic once the remote works again,
+        // because the alternative is waiting for someone to save a file.
+        const { upstream, local } = await makePair('backlog')
+        await commit(local, 'edit.md', 'by an editor\n', 'content: an edit')
+        assert.equal(await git.commitsAhead(local, 'mikser', 'origin/mikser'), 1)
+
+        const logger = collect()
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        assert.equal(result.unpushed, 0, 'the backlog is cleared')
+        assert.equal(await git.commitsAhead(local, 'mikser', 'origin/mikser'), 0)
+        // And it really reached the other repository, not just a moved ref.
+        assert.equal(await git.commitsAhead(upstream, 'mikser', 'main'), 1)
+        assert.ok(logger.lines.some(l => l.level === 'info' && /left behind/.test(l.text)),
+            `the recovery should say what it did: ${JSON.stringify(logger.lines)}`)
+    })
+
+    it('reports a backlog it cannot push as a coded fault', async () => {
+        // Work that exists in exactly one place has to be said out loud. The
+        // code makes it a fault: deduped, and visible in --json and
+        // mikser_ping rather than only in a log nobody reads.
+        const { local } = await makePair('backlog-stuck')
+        await commit(local, 'edit.md', 'by an editor\n', 'content: an edit')
+        // Fetch still works, the push does not — a read-only remote, which is
+        // what an expired write token looks like.
+        const readOnly = path.join(root, 'backlog-stuck-upstream')
+        await git.run(readOnly, ['config', 'receive.denyCurrentBranch', 'refuse'])
+        await git.run(readOnly, ['checkout', '-q', 'mikser'])
+
+        const logger = collect()
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        assert.equal(result.unpushed, 1, 'the count survives so a caller can report it')
+        const fault = logger.lines.find(l => l.level === 'error')
+        assert.ok(fault, `a stranded commit is a fault: ${JSON.stringify(logger.lines)}`)
+        assert.match(fault.text, /never reached the remote/)
+    })
+
     it('reports a failed fetch instead of rejecting', async () => {
         const { local } = await makePair('badremote')
         // Point origin at a path that does not exist: a real fetch failure,
