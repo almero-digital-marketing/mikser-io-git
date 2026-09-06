@@ -158,7 +158,23 @@ export function git(options = {}) {
                 // pass ends — leaving a committed set looking pending, and
                 // re-committed on the next pass.
                 for (const { id, sha } of consumed) await markChangeSetsRecorded([id], sha)
-                for (const { id, reason } of settled) await markChangeSetSettled(id, reason)
+                for (const { id, reason } of settled) {
+                    await markChangeSetSettled(id, reason)
+                    // A set whose written files were gone by the time the pass
+                    // ran is not routine: its work is in neither git nor the
+                    // working folder. Said once, loudly, because the previous
+                    // wording filed this under the same word as an undo
+                    // cancelling itself — and a real one went unnoticed until
+                    // an editor re-applied it by hand.
+                    if (reason === 'paths-gone' || reason === 'partly-gone') {
+                        logger.warn(
+                            { code: 'git-changeset-vanished', changeSet: id, outcome: reason },
+                            'git: change set %s wrote files that were no longer on disk when the commit pass '
+                            + 'ran (%s) — nothing was committed, and its work is not in git either. '
+                            + 'Something replaced or removed them after the write.',
+                            id, reason)
+                    }
+                }
                 for (const { id, err } of failed) await markChangeSetFailed(id, err)
                 // Said every pass, so a stall is visible in the log instead of
                 // inferred from a column of nulls.

@@ -18,6 +18,7 @@ import {
 } from 'mikser-io'
 import * as git from '../lib/git.js'
 import { commitAndPushWriteBranch } from '../lib/sync.js'
+import { previewUndo } from '../lib/undo.js'
 
 let folder
 
@@ -165,7 +166,11 @@ describe('a set with no net diff', async () => {
         // wrong reason.
         const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-empty')
         assert.equal(set.recordedAs, null, 'there is genuinely no commit')
-        assert.equal(set.outcome, 'empty', 'and the null is explained rather than a mystery')
+        // `no-diff`, not the old catch-all `empty`: the file is on disk and
+        // identical to the last commit. That is what was observed. Whether it
+        // wrote matching bytes or something restored them is not knowable from
+        // disk, and the name does not claim to know.
+        assert.equal(set.outcome, 'no-diff', 'and the null is explained rather than a mystery')
     })
 
     it('does not block the sets around it', async () => {
@@ -246,5 +251,65 @@ describe('an open change set keeps its own work', async () => {
         assert.match(await git.run(folder, ['log', '-1', '--format=%s']), /Undo: Add it/)
         assert.equal(await git.run(folder, ['ls-files', 'documents/owned.md']), '',
             'and the file really is gone from git')
+    })
+})
+
+// The distinction the single word `empty` used to hide.
+//
+// A set whose written files are GONE has not cancelled itself — its work is in
+// neither git nor the working folder. On a live site one settled as `empty`
+// with a null commit and read as routine; the editor re-applied it by hand and
+// called the retry "the change was lost during a parallel edit".
+describe('a set whose written files vanished before the pass', () => {
+    it('is not reported as having cancelled itself', async () => {
+        await write('cs-vanish', 'Write something', 'vanishes.md', 'content\n')
+        // Whatever removed it — a reset, a competing writer, a stray delete.
+        await rm(path.join(folder, 'documents', 'vanishes.md'), { force: true })
+
+        const result = await pass()
+        assert.deepEqual(result.committed, [], 'git has nothing to commit')
+        assert.ok(result.settled.includes('cs-vanish'), 'and the set is drained, not left pending')
+
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-vanish')
+        assert.equal(set.outcome, 'paths-gone',
+            'the outcome must say the files were gone, not that the change cancelled out')
+        assert.notEqual(set.outcome, 'empty', 'and must not reuse the word that hid this')
+    })
+
+    it('does not mistake a deletion for a vanished write', async () => {
+        // A set that only REMOVES files legitimately leaves nothing on disk.
+        // Classifying on "the path is gone" alone would report every delete of
+        // an uncommitted file as lost work — a false alarm in the channel that
+        // exists to carry the real one.
+        //
+        // The file is created OUTSIDE git's knowledge so its deletion is not a
+        // diff against HEAD: that is what makes the pass reach the classifier
+        // instead of simply committing.
+        await writeFile(path.join(folder, 'documents', 'never-committed.md'), 'x\n')
+        await withChangeSet({ changeSet: 'cs-del-only', summary: 'Remove it' }, async () => {
+            await useCollection(runtime, 'documents').remove('never-committed.md')
+        })
+        await closeChangeSet('cs-del-only')
+
+        const result = await pass()
+        assert.ok(result.settled.includes('cs-del-only'), 'the set is drained')
+
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-del-only')
+        assert.equal(set.outcome, 'deleted',
+            'a delete-only set is reported as a deletion, not as work that went missing')
+    })
+
+    it('tells an undo that the work was lost rather than cancelled', async () => {
+        // Same refusal — there is no commit — but a different reason, because
+        // "its changes cancelled out" sends someone away satisfied about work
+        // that is gone.
+        await write('cs-vanish2', 'Write something', 'vanishes2.md', 'content\n')
+        await rm(path.join(folder, 'documents', 'vanishes2.md'), { force: true })
+        await pass()
+
+        const result = await previewUndo(folder, { id: 'cs-vanish2', runtime })
+        assert.equal(result.ok, false)
+        assert.equal(result.refused, 'nothing-to-undo-work-missing')
+        assert.match(result.error, /lost rather than cancelled/)
     })
 })
