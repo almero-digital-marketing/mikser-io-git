@@ -166,11 +166,12 @@ describe('a set with no net diff', async () => {
         // wrong reason.
         const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-empty')
         assert.equal(set.recordedAs, null, 'there is genuinely no commit')
-        // `no-diff`, not the old catch-all `empty`: the file is on disk and
-        // identical to the last commit. That is what was observed. Whether it
-        // wrote matching bytes or something restored them is not knowable from
-        // disk, and the name does not claim to know.
-        assert.equal(set.outcome, 'no-diff', 'and the null is explained rather than a mystery')
+        // `replaced`, not the old catch-all `empty`. The file is on disk and
+        // identical to the last commit, and it is NOT what cs-empty wrote —
+        // the checksum recorded at write time proves it. That is lost work,
+        // and it used to be indistinguishable from a write that matched.
+        assert.equal(set.outcome, 'replaced',
+            'the set wrote "edited" and the disk holds "original" — that is a replacement, not a no-op')
     })
 
     it('does not block the sets around it', async () => {
@@ -311,5 +312,57 @@ describe('a set whose written files vanished before the pass', () => {
         assert.equal(result.ok, false)
         assert.equal(result.refused, 'nothing-to-undo-work-missing')
         assert.match(result.error, /lost rather than cancelled/)
+    })
+})
+
+// The distinction the checksum exists to make.
+//
+// A set that produced no commit, with its paths on disk and identical to the
+// last commit, is EITHER a write that matched what was already committed or a
+// write something replaced before the pass ran. From disk alone those are the
+// same picture; against the checksum recorded at write time they are not.
+describe('a set whose paths match the last commit', () => {
+    it('is a no-op when the bytes are the ones it wrote', async () => {
+        await write('cs-seed-same', 'Add it', 'same.md', 'original\n')
+        await pass()
+        // Writes exactly what is already committed.
+        await write('cs-same', 'Write the same bytes', 'same.md', 'original\n')
+
+        await pass()
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-same')
+        assert.equal(set.outcome, 'no-diff',
+            'the bytes on disk are the ones this set wrote — nothing was lost')
+    })
+
+    it('is a replacement when they are not', async () => {
+        await write('cs-seed-diff', 'Add it', 'diff.md', 'original\n')
+        await pass()
+        await write('cs-loses', 'Write something new', 'diff.md', 'the work that vanishes\n')
+        // Something puts the committed version back — a reset, a competing
+        // writer, an inbound merge.
+        await writeFile(path.join(folder, 'documents', 'diff.md'), 'original\n')
+
+        await pass()
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-loses')
+        assert.equal(set.outcome, 'replaced',
+            'what is on disk is not what this set wrote, and the checksum proves it')
+    })
+
+    it('says so plainly when the writer recorded no checksum', async () => {
+        // A writer that does not know its own bytes leaves the question open.
+        // "Cannot tell" is an answer; guessing either way is not.
+        await write('cs-seed-unv', 'Add it', 'unv.md', 'original\n')
+        await pass()
+        await withChangeSet({ changeSet: 'cs-unverifiable', summary: 'No checksum' }, async () => {
+            await writeFile(path.join(folder, 'documents', 'unv.md'), 'changed\n')
+            recordChangeSetWrite({ uri: path.join(folder, 'documents', 'unv.md') })
+        })
+        await closeChangeSet('cs-unverifiable')
+        await writeFile(path.join(folder, 'documents', 'unv.md'), 'original\n')
+
+        await pass()
+        const set = (await listChangeSets({ limit: 20 })).find(s => s.id === 'cs-unverifiable')
+        assert.equal(set.outcome, 'unverifiable',
+            'no checksum was recorded, so neither answer can be claimed')
     })
 })
