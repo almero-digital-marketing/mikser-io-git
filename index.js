@@ -460,5 +460,9 @@ export function git(options = {}) {
             }
             scheduleFire(logger)
         })
+        // Name this package to the runtime's loaded-plugin record. A plugin
+        // that declares nothing still reports as loaded, but as `package: null`
+        // — running, and unable to say what it is.
+        return { module: import.meta.url }
     }
 }
