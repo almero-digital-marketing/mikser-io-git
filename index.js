@@ -174,7 +174,7 @@ export function git(options = {}) {
 
                 const result = await promote(folder, {
                     forge, targetBranch, writeBranch, token, owner, repo, apiBase,
-                    prTitle: `Promote ${writeBranch} → ${targetBranch}`,
+                    prTitle: `Promote ${writeBranch} → ${targetBranch}`, logger,
                 })
                 reportPromote(logger, result)
             } catch (err) {
@@ -251,7 +251,7 @@ export function git(options = {}) {
         async function retryPromote(logger) {
             const result = await promotePending(folder, {
                 forge, targetBranch, writeBranch, token, owner, repo, apiBase,
-                prTitle: `Promote ${writeBranch} → ${targetBranch}`,
+                prTitle: `Promote ${writeBranch} → ${targetBranch}`, logger,
             })
             if (!result) {
                 // Nothing outstanding — the target contains everything.
