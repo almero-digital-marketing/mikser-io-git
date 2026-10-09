@@ -197,6 +197,8 @@ git({
     maxWait:        '10m',            // ceiling — sync fires by this deadline even under
                                        // a steady stream of green cycles that keep resetting `after`
     pollInterval:   '5m',             // how often to check the remote for inbound changes
+    lfsRemote:      undefined,        // remote to fetch Git-LFS objects from before an inbound
+                                       // merge; unset prefers any SSH remote, then `origin`
     message:        ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
     author:         { name: 'mikser', email: 'bot@yourdomain.com' },
 })
@@ -267,7 +269,57 @@ Failure is split in two, because the forge means two different things by it:
 
 On a poll timer (default every 5 minutes, watch mode only — a one-shot build has no "later" to pull into), the plugin fetches and merges `origin/<writeBranch>` then `origin/<branch>` into the local working copy, in that order — note this fetch+merge is NOT scoped to `paths` (a merge operates on whole commits; there's no such thing as "merge just some files"). `git merge` writes files via ordinary filesystem writes, so mikser's own file watcher (chokidar, already watching whichever collection folders their own source plugins registered) sees the change exactly like a human editing a file — no explicit wake-up call needed. A merge could in principle also touch something outside `paths` (say, `main` gained a `mikser.config.js` change from a developer) — mikser doesn't hot-reload its own config, so that lands on disk but has no effect until the process restarts; nothing this plugin needs to solve.
 
+**A promote is held while an inbound pull has not completed.** Promoting then
+would push this folder's tree — built on the commit before the one it could not
+pull — to the target branch. The promote is not lost, only deferred to the next
+poll that pulls cleanly.
+
 **On any merge conflict, the merge is aborted immediately** — the working folder is mikser's live render source; leaving conflict-marker text (`<<<<<<< HEAD`) in a file would mean that text gets rendered as page content on the very next cycle. A conflict is logged with the branch it came from and the raw git error; resolve it by hand in the folder, the same way you'd resolve any git conflict.
+
+### Git-LFS
+
+If the repository uses Git-LFS, an inbound commit that adds a **new** tracked
+file has to materialise that object during the merge — checking it out runs the
+smudge filter, which resolves its endpoint from the remote being merged. Where
+that remote is HTTPS with no stored credentials, a daemon has nothing to answer
+the username prompt with and git-lfs fatals mid-checkout:
+
+```
+fatal: could not read Username for 'https://...': No such device or address
+error: external filter 'git-lfs filter-process' failed
+fatal: media/new.mp4: smudge filter lfs failed
+```
+
+An object already in the local cache smudges with no network at all, so only a
+file *new* to an inbound commit hits this.
+
+**The objects are fetched before the merge starts**, from a remote that can
+serve them, so the smudge resolves from the cache and never reaches the
+network. `lfsRemote` names that remote; unset, any SSH remote is preferred —
+key authentication is what an unattended process has — and `origin` is the
+fallback.
+
+**A merge that cannot be completed is never begun.** If no remote can supply
+the objects, the merge is skipped, the working folder is left genuinely
+untouched, and nothing is promoted until it resolves. This is prevention
+rather than recovery, because there is nothing to recover with: by the time the
+filter fails the merge has already written the commit's *other* files, HEAD has
+not moved, and there is no `MERGE_HEAD` for `git merge --abort` to use. That
+half-applied tree is indistinguishable from an editor's uncommitted work, so it
+gets committed and promoted — carrying a tree built on the commit *before* the
+new media. Recovering it automatically would mean discarding working-folder
+changes, which this plugin will not do.
+
+To recover by hand, populate the cache and let the next poll merge:
+
+```bash
+cd <working folder> && git lfs fetch <remote> origin/<branch>
+```
+
+Use the **remote-tracking** ref. git-lfs resolves the ref locally to decide
+which pointers to download, so a bare branch name resolves to the local branch
+— the commit that does not carry the new pointers yet — and fetches nothing,
+exiting zero while doing it.
 
 **Webhook delivery is not implemented.** Polling is the only supported inbound trigger in this version. A webhook would mean verifying HMAC signatures correctly for two different forges (`X-Hub-Signature-256` for GitHub, a different scheme for Gitea) without a live instance of either to test against while building this — shipping that unverified would be a worse trade than an honest 5-minute default poll interval. If you need faster inbound turnaround, lower `pollInterval`; a real webhook is a plausible follow-up once it can be tested against a live forge.
 

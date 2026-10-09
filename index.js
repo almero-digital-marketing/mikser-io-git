@@ -86,6 +86,7 @@ export function git(options = {}) {
     const {
         url, paths, forge, targetBranch, writeBranch,
         token, message, author, afterMs, maxWaitMs, changeSetAfterMs, pollIntervalMs,
+        lfsRemote,
         owner, repo, apiBase,
     } = resolveConfig(options)
 
@@ -400,7 +401,29 @@ export function git(options = {}) {
                     // here is a bug worth logging, not worth killing the
                     // build server for.
                     withGuard(logger, 'inbound poll', () => enqueueGit(async () => {
-                        await pullInbound(folder, { writeBranch, targetBranch, token, logger })
+                        const inbound = await pullInbound(folder,
+                            { writeBranch, targetBranch, token, lfsRemote, logger })
+                        // A promote after a FAILED pull is the data-loss path.
+                        //
+                        // The result used to be discarded and the promote ran
+                        // regardless, so a merge that could not bring in the
+                        // remote's newest commit was followed by pushing this
+                        // folder's tree — built on the commit BEFORE it — to
+                        // the target branch. Observed on a live deployment
+                        // promoting a tree that had dropped a file, every
+                        // thirty seconds.
+                        //
+                        // While the folder cannot take what the remote has,
+                        // nothing here may claim to be ahead of it. The
+                        // promote is not lost, only held: the next poll that
+                        // pulls cleanly runs it.
+                        if (inbound.merged === false) {
+                            logger.warn(
+                                'git: holding the %s → %s promote — the inbound pull did not complete (%s). '
+                                + 'Promoting now would carry a tree that does not contain the remote\'s newest commit.',
+                                writeBranch, targetBranch, inbound.reason || 'reason unreported')
+                            return
+                        }
                         // Same tick, same queue slot: whatever the pull just
                         // learned about the remote is what the promote should
                         // act on.
