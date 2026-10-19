@@ -32,6 +32,10 @@ const collect = () => {
 
 const OPTS = { writeBranch: 'mikser', targetBranch: 'main' }
 
+// Recorded for failure messages: this suite's behaviour has already differed
+// between git versions, and the version is the first thing a reader needs.
+let gitVersion = '(unknown)'
+
 async function commit(folder, file, content, message) {
     await writeFile(path.join(folder, file), content)
     await git.run(folder, ['add', '-A'])
@@ -40,7 +44,10 @@ async function commit(folder, file, content, message) {
 
 describe('pullInbound against real repositories', async () => {
     let root
-    before(async () => { root = await mkdtemp(path.join(tmpdir(), 'mikser-inbound-')) })
+    before(async () => {
+        root = await mkdtemp(path.join(tmpdir(), 'mikser-inbound-'))
+        gitVersion = await git.run(root, ['--version']).catch(() => '(unknown)')
+    })
     after(async () => { await rm(root, { recursive: true, force: true }) })
 
     // A working folder whose `origin` points at a real upstream repo.
@@ -176,8 +183,17 @@ describe('pullInbound against real repositories', async () => {
 
         const result = await pullInbound(local, { ...OPTS, logger })
 
-        assert.equal(result.merged, false)
-        assert.ok(result.conflictedRef, 'names which branch conflicted')
+        // The result and the log, in the failure message. `actual: undefined`
+        // over `assert.ok(result.conflictedRef)` says only that it is absent,
+        // which is the one thing already obvious — not which of the other
+        // outcomes happened instead, and this classification has already
+        // differed between git versions once.
+        const evidence = () =>
+            `\nresult: ${JSON.stringify(result)}\ngit: ${gitVersion}\nlog:\n  `
+            + logger.lines.map(l => `[${l.level}] ${l.text}`).join('\n  ')
+
+        assert.equal(result.merged, false, evidence())
+        assert.ok(result.conflictedRef, `names which branch conflicted${evidence()}`)
         const content = await readFile(path.join(local, 'page.md'), 'utf8')
         assert.ok(!content.includes('<<<<<<<'), 'no conflict markers survive into the render source')
         assert.equal(content, 'local edit\n', 'local content is what remains')
