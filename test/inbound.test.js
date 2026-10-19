@@ -137,6 +137,33 @@ describe('pullInbound against real repositories', async () => {
         assert.equal(await readFile(path.join(local, 'other.md'), 'utf8'), 'added upstream\n')
     })
 
+    it('tells a merge that FAILED apart from a merge that conflicted', async () => {
+        // Two different outcomes that shared one word. A conflict leaves
+        // MERGE_HEAD and is abortable; a merge that never got that far — a
+        // dirty file in its way, an LFS smudge filter that cannot
+        // authenticate — does not, so `git merge --abort` exits "There is no
+        // merge to abort" and the tree stays however the merge left it.
+        //
+        // Asked of MERGE_HEAD rather than inferred from whether the abort
+        // succeeded: that reads an exit code for a question git will answer,
+        // and the two are not the same question on every git version.
+        const { upstream, local } = await makePair('blocked')
+        await commit(upstream, 'page.md', 'upstream edit\n', 'upstream')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        // Uncommitted, and in the way: git refuses before starting.
+        await writeFile(path.join(local, 'page.md'), 'an editor is mid-sentence\n')
+
+        const result = await pullInbound(local, { ...OPTS, logger: collect() })
+
+        assert.equal(result.merged, false)
+        assert.equal(result.conflictedRef, undefined,
+            'a merge that never started is not a conflict, and saying so sends the reader after markers that are not there')
+        assert.ok(result.failedRef, 'names the branch it could not merge')
+        assert.equal(result.dirty, true, 'the folder has changes, so it must not be reported as untouched')
+        assert.equal(await readFile(path.join(local, 'page.md'), 'utf8'), 'an editor is mid-sentence\n',
+            'the uncommitted edit must survive')
+    })
+
     it('aborts a conflicted merge and leaves no conflict markers', async () => {
         // The reason abort-and-report is the only acceptable outcome: this
         // folder is mikser's live render source, so a half-applied merge
