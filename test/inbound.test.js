@@ -60,6 +60,14 @@ describe('pullInbound against real repositories', async () => {
         await git.run(upstream, ['branch', 'mikser'])
         await git.run('.', ['clone', '-q', upstream, local])
         await git.run(local, ['checkout', '-q', 'mikser'])
+        // A merge records a commit, so it needs a committer. `commit()` above
+        // passes `-c user.*` per call, which covers commits and not merges —
+        // so on a runner whose account has no real name to derive one from,
+        // every merge here failed on `empty ident name` and the conflict case
+        // was never reached. It passed anyway, because the code then called
+        // any merge failure a conflict.
+        await git.run(local, ['config', 'user.email', 'w@w'])
+        await git.run(local, ['config', 'user.name', 'W'])
         return { upstream, local }
     }
 
@@ -142,6 +150,51 @@ describe('pullInbound against real repositories', async () => {
 
         assert.equal(result.merged, true)
         assert.equal(await readFile(path.join(local, 'other.md'), 'utf8'), 'added upstream\n')
+    })
+
+    it('merges on a host where git cannot derive an identity', async () => {
+        // The deployment shape: a container running as a bare service user.
+        // git guesses a committer from the OS account, that guess has no real
+        // name, and git refuses the empty one — reaching `git merge`, not just
+        // `git commit`, because a merge records a commit too. The plugin's
+        // configured `author` is the identity it should be using anyway.
+        //
+        // `user.name=` empty is exactly the state git lands in when it cannot
+        // derive one, and is reproducible on any machine.
+        const { upstream, local } = await makePair('ident')
+        // BOTH sides move, on different files. A fast-forward records no
+        // commit at all, so it needs no identity and would pass this test
+        // with the fix reverted.
+        await commit(local, 'local.md', 'from the CMS\n', 'local change')
+        await commit(upstream, 'other.md', 'added upstream\n', 'upstream change')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        await git.run(local, ['config', 'user.name', ''])
+
+        const result = await pullInbound(local, {
+            ...OPTS, author: { name: 'mikser', email: 'bot@example.com' }, logger: collect(),
+        })
+
+        assert.equal(result.merged, true, `the merge failed: ${result.reason}`)
+        assert.equal(await readFile(path.join(local, 'other.md'), 'utf8'), 'added upstream\n')
+    })
+
+    it('still fails honestly when it has no identity and none is configured', async () => {
+        // Unconfigured, git resolves it exactly as before — so this is the
+        // message an operator gets, and it must not be dressed up as a
+        // conflict. That mislabel is what hid the real cause for two releases.
+        const { upstream, local } = await makePair('ident-none')
+        await commit(local, 'local.md', 'from the CMS\n', 'local change')
+        await commit(upstream, 'other.md', 'added upstream\n', 'upstream change')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        await git.run(local, ['config', 'user.name', ''])
+        const logger = collect()
+
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        assert.equal(result.merged, false)
+        assert.equal(result.conflictedRef, undefined, 'an identity failure is not a conflict')
+        assert.ok(result.failedRef)
+        assert.match(result.reason, /ident/i, 'the reason must name what git actually refused')
     })
 
     it('tells a merge that FAILED apart from a merge that conflicted', async () => {

@@ -201,6 +201,8 @@ git({
                                        // merge; unset prefers any SSH remote, then `origin`
     message:        ({ fileCount }) => `content: ${fileCount} file(s) via mikser`,
     author:         { name: 'mikser', email: 'bot@yourdomain.com' },
+                                      // also the COMMITTER for its commits and merges —
+                                      // set it on an unattended host, see below
 })
 ```
 
@@ -268,6 +270,20 @@ Failure is split in two, because the forge means two different things by it:
 ## Inbound sync
 
 On a poll timer (default every 5 minutes, watch mode only — a one-shot build has no "later" to pull into), the plugin fetches and merges `origin/<writeBranch>` then `origin/<branch>` into the local working copy, in that order — note this fetch+merge is NOT scoped to `paths` (a merge operates on whole commits; there's no such thing as "merge just some files"). `git merge` writes files via ordinary filesystem writes, so mikser's own file watcher (chokidar, already watching whichever collection folders their own source plugins registered) sees the change exactly like a human editing a file — no explicit wake-up call needed. A merge could in principle also touch something outside `paths` (say, `main` gained a `mikser.config.js` change from a developer) — mikser doesn't hot-reload its own config, so that lands on disk but has no effect until the process restarts; nothing this plugin needs to solve.
+
+**Set `author` on an unattended host.** It names the committer as well as the
+author, for merges as well as commits. Without it git resolves the committer
+itself — `user.name`/`user.email`, then a guess from the OS account — and on a
+container running as a bare service user there is no real name to guess from,
+so git refuses the empty one it derives:
+
+```
+fatal: empty ident name (for <runner@...>) not allowed
+```
+
+A merge records a commit too, so that reaches the inbound merge and not just
+the sync commit. The failure is reported as a merge that could not start,
+naming what git refused.
 
 **A promote is held while an inbound pull has not completed.** Promoting then
 would push this folder's tree — built on the commit before the one it could not
