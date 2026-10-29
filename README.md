@@ -290,6 +290,15 @@ would push this folder's tree — built on the commit before the one it could no
 pull — to the target branch. The promote is not lost, only deferred to the next
 poll that pulls cleanly.
 
+**A merge git refuses to start names what is in the way.** When the incoming
+commit would overwrite a file with uncommitted edits here, or an untracked file
+it adds, git checks every path before writing any and refuses — so nothing was
+applied and the folder is exactly as it was. The error (`git-merge-blocked`)
+lists those files and says who clears them: one inside `paths` is committed by
+the next green cycle, after which the merge is a real one; one outside `paths`
+is never committed by this plugin, so the refusal repeats every poll until a
+person commits or discards it — typically a hand edit made on the server.
+
 **On any merge conflict, the merge is aborted immediately** — the working folder is mikser's live render source; leaving conflict-marker text (`<<<<<<< HEAD`) in a file would mean that text gets rendered as page content on the very next cycle. A conflict is logged with the branch it came from and the raw git error; resolve it by hand in the folder, the same way you'd resolve any git conflict.
 
 ### Git-LFS

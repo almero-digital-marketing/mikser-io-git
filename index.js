@@ -402,7 +402,7 @@ export function git(options = {}) {
                     // build server for.
                     withGuard(logger, 'inbound poll', () => enqueueGit(async () => {
                         const inbound = await pullInbound(folder,
-                            { writeBranch, targetBranch, token, lfsRemote, author, logger })
+                            { writeBranch, targetBranch, paths, token, lfsRemote, author, logger })
                         // A promote after a FAILED pull is the data-loss path.
                         //
                         // The result used to be discarded and the promote ran

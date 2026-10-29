@@ -20,13 +20,20 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { format } from 'node:util'
 
 import * as git from '../lib/git.js'
 import { pullInbound } from '../lib/inbound.js'
 
+// `text` is the raw arguments; `message` is the line as the logger prints
+// it — the leading fields object dropped, %s filled in.
 const collect = () => {
     const lines = []
-    const push = (level) => (...args) => lines.push({ level, text: args.join(' ') })
+    const push = (level) => (...args) => lines.push({
+        level,
+        text: args.join(' '),
+        message: format(...(typeof args[0] === 'object' ? args.slice(1) : args)),
+    })
     return { lines, warn: push('warn'), error: push('error'), info: push('info') }
 }
 
@@ -222,6 +229,70 @@ describe('pullInbound against real repositories', async () => {
         assert.equal(result.dirty, true, 'the folder has changes, so it must not be reported as untouched')
         assert.equal(await readFile(path.join(local, 'page.md'), 'utf8'), 'an editor is mid-sentence\n',
             'the uncommitted edit must survive')
+    })
+
+    it('names the files that refused the merge, and says nothing was applied', async () => {
+        // The words the generic failure uses — "may be part of the commit the
+        // merge half-applied" — are false for this one. Git checks every file
+        // before it writes any, so the tree is untouched, and the reader needs
+        // the file that is in the way, not a half-merge to go looking for.
+        const { upstream, local } = await makePair('refused')
+        await commit(upstream, 'page.md', 'upstream edit\n', 'upstream')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        await writeFile(path.join(local, 'page.md'), 'an editor is mid-sentence\n')
+        const head = await git.revParse(local, 'HEAD')
+        const logger = collect()
+
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        const fault = logger.lines.find(l => l.level === 'error')
+        const seen = `git ${gitVersion}; result ${JSON.stringify(result)}; log ${JSON.stringify(logger.lines)}`
+        assert.deepEqual(result.blockedBy, ['page.md'], seen)
+        assert.match(result.reason, /uncommitted edits to page\.md/, 'the held promote quotes this reason')
+        assert.match(fault.message, /would overwrite uncommitted edits to page\.md/, seen)
+        assert.match(fault.message, /nothing was applied/, seen)
+        assert.doesNotMatch(fault.message, /half-applied/, seen)
+        // No `paths`: the whole folder is in scope, so the sync pass will
+        // commit it and nobody has to.
+        assert.match(fault.message, /inside `paths`, so the next green cycle commits it/, seen)
+        assert.equal(await git.revParse(local, 'HEAD'), head, 'HEAD did not move')
+        assert.equal(await readFile(path.join(local, 'page.md'), 'utf8'), 'an editor is mid-sentence\n')
+    })
+
+    it('says a person has to clear a blocking file outside `paths`', async () => {
+        // What held a live deployment: a hand edit to scripts/ on the server,
+        // in a folder the plugin does not commit. Nothing would ever clear it,
+        // so the refusal repeated every poll — and the log has to say that.
+        const { upstream, local } = await makePair('refused-outside')
+        await commit(upstream, 'page.md', 'upstream edit\n', 'upstream')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        await writeFile(path.join(local, 'page.md'), 'edited by hand on the server\n')
+        const logger = collect()
+
+        const result = await pullInbound(local, { ...OPTS, paths: ['documents'], logger })
+
+        const fault = logger.lines.find(l => l.level === 'error')
+        const seen = `result ${JSON.stringify(result)}; log ${JSON.stringify(logger.lines)}`
+        assert.deepEqual(result.blockedBy, ['page.md'], seen)
+        assert.match(fault.message, /page\.md is outside `paths`, so this plugin will never commit it/, seen)
+        assert.match(fault.message, /git checkout -- <file>/, seen)
+        assert.doesNotMatch(fault.message, /next green cycle/, seen)
+    })
+
+    it('names an untracked file the incoming commit would overwrite', async () => {
+        const { upstream, local } = await makePair('refused-untracked')
+        await commit(upstream, 'new.md', 'added upstream\n', 'upstream')
+        await git.run(upstream, ['branch', '-f', 'mikser', 'main'])
+        await writeFile(path.join(local, 'new.md'), 'made here first\n')
+        const logger = collect()
+
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        const fault = logger.lines.find(l => l.level === 'error')
+        const seen = `result ${JSON.stringify(result)}; log ${JSON.stringify(logger.lines)}`
+        assert.deepEqual(result.blockedBy, ['new.md'], seen)
+        assert.match(fault.message, /untracked new\.md, which the commit adds/, seen)
+        assert.equal(await readFile(path.join(local, 'new.md'), 'utf8'), 'made here first\n')
     })
 
     it('aborts a conflicted merge and leaves no conflict markers', async () => {
