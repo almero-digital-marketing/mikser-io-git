@@ -96,8 +96,55 @@ describe('pullInbound against real repositories', async () => {
         assert.equal(await git.commitsAhead(local, 'mikser', 'origin/mikser'), 0)
         // And it really reached the other repository, not just a moved ref.
         assert.equal(await git.commitsAhead(upstream, 'mikser', 'main'), 1)
-        assert.ok(logger.lines.some(l => l.level === 'info' && /left behind/.test(l.text)),
+        assert.ok(logger.lines.some(l => l.level === 'info'
+            && /1 of them existed only in this working folder — an earlier push had failed/.test(l.message)),
             `the recovery should say what it did: ${JSON.stringify(logger.lines)}`)
+    })
+
+    // The routine case the line above was misreporting. A deploy lands on the
+    // target; one poll merges it into the write branch and pushes nothing; the
+    // next poll pushes the write branch. Nothing was ever at risk — the commits
+    // were on the remote all along, under the target's name — and on lmed the
+    // old wording announced a rescued failure after every single deploy.
+    it('does not call a write branch catching up with the target a failure', async () => {
+        const { upstream, local } = await makePair('catchup')
+        await commit(upstream, 'deploy.md', 'shipped\n', 'a deploy, pushed to the target')
+
+        await pullInbound(local, { ...OPTS, logger: collect() })
+        assert.equal(await git.commitsAhead(local, 'mikser', 'origin/mikser'), 1,
+            'the first poll merges the target in and pushes nothing — the state the second poll meets')
+
+        const logger = collect()
+        const result = await pullInbound(local, { ...OPTS, logger })
+
+        assert.equal(result.unpushed, 0)
+        assert.equal(await git.commitsAhead(upstream, 'main', 'mikser'), 0, 'the remote write branch caught up')
+        const pushed = logger.lines.find(l => l.level === 'info' && /pushed/.test(l.message))
+        assert.ok(pushed, `the push is still reported: ${JSON.stringify(logger.lines)}`)
+        assert.match(pushed.message, /pushed 1 commit\(s\) to mikser, merged in from main and already on the remote/)
+        assert.doesNotMatch(pushed.message, /failed|left behind|only in this working folder/)
+    })
+
+    // Same, when the write branch had moved too, so the inbound pass made a
+    // real merge commit. That commit exists only here — but it joins two states
+    // the remote already holds, so it is not stranded work either.
+    it('does not count its own merge commit as stranded work', async () => {
+        const { upstream, local } = await makePair('catchup-merge')
+        await commit(local, 'edit.md', 'by an editor\n', 'content: an edit')
+        await git.push(local, 'mikser')
+        await commit(upstream, 'deploy.md', 'shipped\n', 'a deploy, pushed to the target')
+
+        await pullInbound(local, { ...OPTS, logger: collect() })
+        assert.equal(await git.commitsAhead(local, 'mikser', 'origin/mikser'), 2,
+            'the target commit and the merge commit joining it in')
+
+        const logger = collect()
+        await pullInbound(local, { ...OPTS, logger })
+
+        const pushed = logger.lines.find(l => l.level === 'info' && /pushed/.test(l.message))
+        assert.ok(pushed, `the push is still reported: ${JSON.stringify(logger.lines)}`)
+        assert.match(pushed.message, /pushed 2 commit\(s\) to mikser, merged in from main/)
+        assert.doesNotMatch(pushed.message, /failed|only in this working folder/)
     })
 
     it('reports a backlog it cannot push as a coded fault', async () => {
